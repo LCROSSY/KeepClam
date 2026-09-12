@@ -1,0 +1,15 @@
+name: Build and test
+description: Builds KeepClam.app and runs the LogTests unit tests. KEEPCLAM_VERSION overrides the bundled version (tag builds strip a leading "v").
+runs:
+  using: composite
+  steps:
+    - name: Build app
+      shell: bash
+      run: zsh scripts/build-native.command
+
+    - name: Run unit tests
+      shell: bash
+      run: |
+        clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement \
+          Sources/LogTests.m -o build/LogTests
+        ./build/LogTests
