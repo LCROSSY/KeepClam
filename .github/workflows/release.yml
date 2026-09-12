@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  id-token: write   # artifact attestation
+  contents: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/build-and-test
+        env:
+          KEEPCLAM_VERSION: ${{ github.ref_name }}
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          /usr/bin/ditto -c -k --norsrc --noextattr --keepParent build/KeepClam.app "KeepClam-${VERSION}.zip"
+          shasum -a 256 "KeepClam-${VERSION}.zip" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: KeepClam-*.zip
+
+      - name: Upload release artifact
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: |
+            KeepClam-*.zip
+            SHA256SUMS
+          generate_release_notes: true
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true

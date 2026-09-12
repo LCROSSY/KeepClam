@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+work/
+*.app
+*.zip
+dist/
+
+# Runtime data
+logs/
+settings.json
+*.log
+*.log.[0-9]
+
+# macOS
+.DS_Store
+
+# Local tooling & planning (not part of the published project)
+.agents/
+.claude/
+.zcode/
+openspec/
+
+# Xcode / clang
+*.dSYM/
+xcuserdata/
