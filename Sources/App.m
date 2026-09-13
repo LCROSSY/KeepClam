@@ -227,6 +227,17 @@ static NSString *AutoStopReason(NSInteger batteryPct,BOOL onAC,BOOL lowPower,NSI
     return nil;
 }
 
+// Alert title keys for a failed toggle, routed by consequence. Disabling: 2 = the old
+// guard never exited, so the system sleep settings were never touched; 3 = it exited but
+// the restore is unconfirmed. Enabling: a failed guard start gets its own title; when the
+// fallback restore also failed, that failure is the more urgent fact.
+static NSString *ToggleAlertTitle(BOOL enable,int stopResult,NSString *body) {
+    if(!enable) return stopResult==2?@"toggle.guardstuck.title":@"toggle.restorefail.title";
+    if([body isEqualToString:@"toggle.fail.guard.body"]) return @"toggle.fail.guard.title";
+    if([body isEqualToString:@"toggle.restorefail.body"]) return @"toggle.restorefail.title";
+    return @"alert.title";
+}
+
 // Privileged pmset flip: passwordless via the sudoers whitelist first, admin prompt as fallback.
 static BOOL SetSleepDisabledNoPrompt(BOOL on) {
     Run(@"/usr/bin/sudo",@[@"-n",@"/usr/bin/pmset",@"-a",@"disablesleep",on?@"1":@"0"]);
@@ -557,6 +568,26 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     [self log:[NSString stringWithFormat:@"battery_floor=%ld%%",(long)sender.tag]];
     [self tick:nil];
 }
+// Single session teardown: persist pending summaries, record why the session ended,
+// then reset every per-session field. All end paths (tick's external close, auto-stop,
+// toggle off) go through this so no path leaves state behind differently.
+- (void)endSessionWithReason:(NSString *)reason {
+    [self flush];
+    if(reason) [self log:reason];
+    self.owned=NO; self.sessionDeadline=nil; self.lastLog=nil; self.networkTime=nil;
+    self.guardPID=0; [self watchGuardExit];
+}
+// Single session start: drain the old session's writes, reset sampling throttle and
+// network cache so the first sample of the new session reflects reality, and arm the
+// guard exit watch. `pid` is 0 in tests, where no guard exists.
+- (void)beginSessionWithGuard:(pid_t)pid startSec:(unsigned long long)sec startUsec:(unsigned long long)usec deadline:(NSDate *)deadline {
+    [self flush];
+    self.owned=YES; self.active=YES;
+    self.guardPID=pid; self.guardStartSec=sec; self.guardStartUsec=usec;
+    [self watchGuardExit];
+    self.lastLog=nil; self.networkTime=nil;
+    self.sessionDeadline=deadline;
+}
 // Liveness is identity-based, not kill(pid,0): a zombie answers kill(pid,0) as alive and
 // PIDs get reused, so require the exact start-time identity recorded at guard start.
 - (BOOL)guardIsAlive {
@@ -623,7 +654,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     self.toggleItem.title=enabled?L(@"menu.disable"):L(@"menu.enable");
     self.item.button.title=enabled?@"● KeepClam":@"○ KeepClam";
     self.thermalItem.title=enabled?[NSString stringWithFormat:L(@"menu.thermal"),Thermal()]:L(@"menu.thermal.idle");
-    if(self.active && !enabled) { [self flush]; [self log:@"session_ended"]; self.owned=NO; self.lastLog=nil; self.networkTime=nil; self.sessionDeadline=nil; }
+    if(self.active && !enabled) [self endSessionWithReason:@"session_ended"];
     if(!self.active && enabled) [self log:@"session_observed_enabled"];
     self.active=enabled;
     if(enabled && self.owned && ![self guardIsAlive]) {
@@ -662,6 +693,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     self.busy=YES; self.generation++;
     [self flush];
     [self log:[NSString stringWithFormat:@"auto_stop=%@",reason]];
+    [self endSessionWithReason:nil];
     NSString *text;
     if([reason isEqualToString:@"timer"]) text=L(@"notify.autostop.timer");
     else if([reason isEqualToString:@"battery_floor"]) text=[NSString stringWithFormat:L(@"notify.autostop.battery"),(long)self.batteryFloor];
@@ -672,7 +704,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
         int r=StopGuardNoPrompt();
         BOOL restored=Enabled()==SleepOff;
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.owned=NO; self.active=NO; self.sessionDeadline=nil; self.lastLog=nil; self.networkTime=nil;
+            self.active=NO;
             self.busy=NO;
             if(r!=0 || !restored) {
                 [self log:@"auto_stop_restore_failed: sudo -n pmset could not restore sleep"];
@@ -734,21 +766,27 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
                 }
                 else problem=SetSleepDisabled(NO)?@"toggle.fail.guard.body":@"toggle.restorefail.body";
             } else problem=@"toggle.fail.pmset.body";
-        } else { stopResult=StopGuard(); ok=stopResult==0; if(!ok) problem=@"toggle.restorefail.body"; }
+        } else {
+            stopResult=StopGuard(); ok=stopResult==0;
+            if(!ok) problem=stopResult==2?@"toggle.guardstuck.body":@"toggle.restorefail.body";
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             self.busy=NO;
             if(ok) {
-                [self flush]; self.owned=enable; self.active=enable;
                 if(enable) {
-                    self.guardPID=pid; self.guardStartSec=startSec; self.guardStartUsec=startUsec;
-                    [self watchGuardExit];
-                } else self.guardPID=0;
-                self.sessionDeadline=enable && self.sessionDuration>0?[NSDate dateWithTimeIntervalSinceNow:self.sessionDuration]:nil;
-                [self log:enable?@"session_enabled_guard_confirmed":@"session_disabled"];
-                if(enable) { [self requestNotifyAuth]; if(![self sudoersFilePresent]) [self offerAuthInstallGuide]; }
+                    [self beginSessionWithGuard:pid startSec:startSec startUsec:startUsec deadline:self.sessionDuration>0?[NSDate dateWithTimeIntervalSinceNow:self.sessionDuration]:nil];
+                    [self log:@"session_enabled_guard_confirmed"];
+                    [self requestNotifyAuth];
+                    if(![self sudoersFilePresent]) [self offerAuthInstallGuide];
+                } else {
+                    [self endSessionWithReason:@"session_disabled"];
+                    self.active=NO;
+                }
             } else {
                 [self log:[NSString stringWithFormat:@"toggle_failed enable=%d stop_guard=%d problem=%@",enable?1:0,stopResult,problem?:@"none"]];
-                NSAlert *a=[NSAlert new]; a.messageText=L(@"alert.title"); a.informativeText=L(problem); [a runModal];
+                NSAlert *a=[NSAlert new];
+                a.messageText=L(ToggleAlertTitle(enable,stopResult,problem));
+                a.informativeText=L(problem); [a runModal];
             }
             [self tick:nil];
         });

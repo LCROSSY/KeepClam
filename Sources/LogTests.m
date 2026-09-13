@@ -91,6 +91,31 @@ int main(void) {
         CHECK(AutoStopReason(51,NO,NO,50,future,now)==nil);
         CHECK([AutoStopReason(10,NO,YES,20,past,now) isEqual:@"timer"]);
         CHECK(AutoStopReason(80,NO,NO,20,nil,now)==nil);
+        // Session boundaries: teardown clears every per-session field and records the end.
+        app.owned=YES; app.active=YES;
+        app.sessionDeadline=[NSDate dateWithTimeIntervalSinceNow:60];
+        app.lastLog=[NSDate date]; app.networkTime=[NSDate date];
+        app.count=2; app.sampleKey=@"lid=closed thermal=nominal";
+        app.rangeStart=[NSDate dateWithTimeIntervalSinceNow:-10]; app.rangeEnd=[NSDate date];
+        [app endSessionWithReason:@"session_ended"];
+        CHECK(app.owned==NO && app.sessionDeadline==nil && app.lastLog==nil && app.networkTime==nil);
+        text=[NSString stringWithContentsOfFile:app.logPath encoding:NSUTF8StringEncoding error:nil];
+        CHECK([text containsString:@"session_ended"] && [text containsString:@"samples=2"]);
+        // A fresh session must not inherit the previous session's throttle or network cache.
+        app.lastLog=[NSDate date]; app.networkTime=[NSDate date];
+        [app beginSessionWithGuard:0 startSec:0 startUsec:0 deadline:[NSDate dateWithTimeIntervalSinceNow:60]];
+        CHECK(app.owned && app.active && app.lastLog==nil && app.networkTime==nil && app.sessionDeadline!=nil);
+        [app endSessionWithReason:nil];
+        CHECK(app.owned==NO && app.sessionDeadline==nil);
+        // Toggle-failure alerts are routed by consequence, not one generic message.
+        CHECK([ToggleAlertTitle(NO,2,nil) isEqualToString:@"toggle.guardstuck.title"]);
+        CHECK([ToggleAlertTitle(NO,3,nil) isEqualToString:@"toggle.restorefail.title"]);
+        CHECK([ToggleAlertTitle(YES,0,@"toggle.fail.guard.body") isEqualToString:@"toggle.fail.guard.title"]);
+        CHECK([ToggleAlertTitle(YES,0,@"toggle.restorefail.body") isEqualToString:@"toggle.restorefail.title"]);
+        CHECK([ToggleAlertTitle(YES,0,@"toggle.fail.pmset.body") isEqualToString:@"alert.title"]);
+        // The stuck-guard outcome means the settings were never touched: no emergency command there.
+        CHECK(![Pair(@"toggle.guardstuck.body",1) containsString:@"disablesleep"]);
+        CHECK(![Pair(@"toggle.guardstuck.body",2) containsString:@"disablesleep"]);
         // Remaining-time formatting boundaries, both languages.
         CHECK([@"59 分钟" isEqualToString:FormatInterval(59*60.0,1)]);
         CHECK([@"1 小时 0 分" isEqualToString:FormatInterval(60*60.0,1)]);
