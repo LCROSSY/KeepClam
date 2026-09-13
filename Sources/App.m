@@ -29,6 +29,14 @@ static int InstanceLock(NSString *path) {
     if(flock(fd,LOCK_EX|LOCK_NB)!=0) { close(fd); return -1; }
     fchmod(fd,0600); return fd;
 }
+// Rotates path to path.1..3; the caller holds the log's flock. Shared by the guard's
+// per-line Append and the app's resident-fd writer.
+static void RotateLog(NSString *path) {
+    NSFileManager *fm=NSFileManager.defaultManager;
+    [fm removeItemAtPath:[path stringByAppendingString:@".3"] error:nil];
+    for(int i=2;i>=1;i--) [fm moveItemAtPath:[path stringByAppendingFormat:@".%d",i] toPath:[path stringByAppendingFormat:@".%d",i+1] error:nil];
+    [fm moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
+}
 static void Append(NSString *path,NSString *line) {
     int lock=open([[path stringByAppendingString:@".lock"] fileSystemRepresentation],O_CREAT|O_RDWR|O_NOFOLLOW|O_CLOEXEC,0600);
     if(lock<0) return;
@@ -37,12 +45,7 @@ static void Append(NSString *path,NSString *line) {
     struct stat st;
     int existing=open(path.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
     if(existing>=0) { fchmod(existing,0600); close(existing); }
-    if(lstat(path.fileSystemRepresentation,&st)==0 && S_ISREG(st.st_mode) && st.st_size>1024*1024) {
-        NSFileManager *fm=NSFileManager.defaultManager;
-        [fm removeItemAtPath:[path stringByAppendingString:@".3"] error:nil];
-        for(int i=2;i>=1;i--) [fm moveItemAtPath:[path stringByAppendingFormat:@".%d",i] toPath:[path stringByAppendingFormat:@".%d",i+1] error:nil];
-        [fm moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
-    }
+    if(lstat(path.fileSystemRepresentation,&st)==0 && S_ISREG(st.st_mode) && st.st_size>1024*1024) RotateLog(path);
     int fd=open(path.fileSystemRepresentation,O_CREAT|O_WRONLY|O_APPEND|O_NOFOLLOW|O_CLOEXEC,0600);
     if(fd>=0) {
         fchmod(fd,0600);
@@ -132,7 +135,7 @@ static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
             @"auth.guide.install":@[@"安装免密授权",@"Install Whitelist"],
             @"auth.guide.later":@[@"暂不安装",@"Not Now"],
             @"auth.installed.title":@[@"免密授权已安装",@"Passwordless Whitelist Installed"],
-            @"auth.installed.view.body":@[@"白名单 /etc/sudoers.d/keepclam 仅授权以下两条命令免密执行：\n\n%@\n\n查看实际内容：sudo cat /etc/sudoers.d/keepclam\n移除授权：运行 scripts/uninstall-sudoers.sh",@"The whitelist /etc/sudoers.d/keepclam authorizes exactly these two commands without a password:\n\n%@\n\nInspect it: sudo cat /etc/sudoers.d/keepclam\nRemove it: run scripts/uninstall-sudoers.sh"],
+            @"auth.installed.view.body":@[@"白名单 %@ 仅授权以下两条命令免密执行：\n\n%@\n\n查看实际内容：sudo cat %@\n移除授权：运行 scripts/uninstall-sudoers.sh",@"The whitelist %@ authorizes exactly these two commands without a password:\n\n%@\n\nInspect it: sudo cat %@\nRemove it: run scripts/uninstall-sudoers.sh"],
             @"auth.installed.body":@[@"以后开关合盖运行不再需要输入管理员密码。可用 scripts/uninstall-sudoers.sh 移除。",@"Toggling no longer needs an admin password. Remove anytime with scripts/uninstall-sudoers.sh."],
             @"toggle.fail.pmset.body":@[@"无法设置系统睡眠策略。可在菜单中选择「免密授权：未安装 — 点击安装」一次性授权，或重试输入管理员密码。",@"Could not set the system sleep policy. Install the passwordless whitelist from the menu, or retry with the admin password."],
             @"toggle.fail.guard.title":@[@"保护进程启动失败",@"Failed to Start the Guard"],
@@ -256,6 +259,10 @@ static BOOL SetSleepDisabled(BOOL on) {
 
 static NSString *LogDir(void){ return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/KeepClam"]; }
 static NSString *LogFilePath(void){ return [LogDir() stringByAppendingPathComponent:@"运行日志.log"]; }
+// Single source of truth for the whitelist location; presence checks, install and
+// uninstall must all agree. Fixed literal with no shell metacharacters, so it can be
+// interpolated into the install command as-is.
+static NSString *SudoersPath(void){ return @"/etc/sudoers.d/keepclam"; }
 static NSString *LockPath(void){ return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/KeepClam/guard.lock"]; }
 
 static void GuardLog(NSString *event) {
@@ -390,6 +397,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 @property BOOL active;
 @property BOOL sampling;
 @property dispatch_queue_t worker;
+@property int logFD; // resident log fd, touched only on self.worker; -1 until opened
 @property NSString *sampleKey;
 @property NSDate *rangeStart;
 @property NSDate *rangeEnd;
@@ -406,19 +414,63 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 @end
 
 @implementation App
+- (instancetype)init {
+    if(self=[super init]) _logFD=-1;
+    return self;
+}
 - (NSInteger)sessionDuration { return MAX(0,[NSUserDefaults.standardUserDefaults integerForKey:@"duration"]); }
 - (NSInteger)batteryFloor { NSInteger f=[NSUserDefaults.standardUserDefaults integerForKey:@"battery_floor"]; return f>0?f:20; }
 - (NSString *)ruleText {
     return [NSString stringWithFormat:@"%@ ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1",NSUserName()];
 }
-- (BOOL)sudoersFilePresent { return [NSFileManager.defaultManager fileExistsAtPath:@"/etc/sudoers.d/keepclam"]; }
+- (BOOL)sudoersFilePresent { return [NSFileManager.defaultManager fileExistsAtPath:SudoersPath()]; }
+// Log writes never run on the main thread: they are appended by self.worker so a busy
+// disk cannot stall the menu. Ordering is guaranteed by the queue, durability by fsync.
 - (void)log:(NSString *)event {
-    Append(self.logPath,[NSString stringWithFormat:@"%@ | %@\n",[NSDate date],event]);
+    NSString *line=[NSString stringWithFormat:@"%@ | %@\n",[NSDate date],event];
+    dispatch_async(self.worker,^{ [self writeLine:line]; });
 }
+// Runs on self.worker only. Keeps the fd open across writes and rebuilds it after a
+// rotation — ours (size over 1 MB) or the guard's (detected by the inode mismatch).
+// Cross-process mutual exclusion stays with the flock; the mode stays 0600.
+- (void)writeLine:(NSString *)line {
+    if(!self.logPath) return;
+    NSString *path=self.logPath;
+    int lock=open([[path stringByAppendingString:@".lock"] fileSystemRepresentation],O_CREAT|O_RDWR|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(lock<0) return;
+    fchmod(lock,0600);
+    flock(lock,LOCK_EX);
+    struct stat pst;
+    BOOL rotate=NO;
+    if(self.logFD>=0) {
+        struct stat fst;
+        if(fstat(self.logFD,&fst)!=0 || !S_ISREG(fst.st_mode)
+           || lstat(path.fileSystemRepresentation,&pst)!=0 || pst.st_ino!=fst.st_ino) {
+            close(self.logFD); self.logFD=-1;
+        } else if(fst.st_size>1024*1024) rotate=YES;
+    }
+    if(rotate) RotateLog(path);
+    if(self.logFD<0) {
+        self.logFD=open(path.fileSystemRepresentation,O_CREAT|O_WRONLY|O_APPEND|O_NOFOLLOW|O_CLOEXEC,0600);
+        if(self.logFD>=0) fchmod(self.logFD,0600);
+    }
+    if(self.logFD>=0) {
+        NSData *data=[line dataUsingEncoding:NSUTF8StringEncoding];
+        const char *bytes=data.bytes; size_t left=data.length;
+        while(left) { ssize_t n=write(self.logFD,bytes,left); if(n<0 && errno==EINTR) continue; if(n<=0) break; bytes+=n; left-=n; }
+        fsync(self.logFD);
+    }
+    flock(lock,LOCK_UN); close(lock);
+}
+// Returns after every queued line is on disk. While a teardown owns the worker the wait
+// is skipped: that path can sync to the main queue for the admin prompt, and waiting
+// here could deadlock. Callers on the main thread only.
 - (void)flush {
-    if(!self.count) return;
-    [self log:[NSString stringWithFormat:@"summary start=%@ end=%@ samples=%lu max_gap=%.1fs | %@",self.rangeStart,self.rangeEnd,(unsigned long)self.count,self.maxGap,self.sampleKey]];
-    self.count=0; self.sampleKey=nil;
+    if(self.count) {
+        [self log:[NSString stringWithFormat:@"summary start=%@ end=%@ samples=%lu max_gap=%.1fs | %@",self.rangeStart,self.rangeEnd,(unsigned long)self.count,self.maxGap,self.sampleKey]];
+        self.count=0; self.sampleKey=nil;
+    }
+    if(!self.busy) dispatch_sync(self.worker,^{});
 }
 - (void)sample:(NSString *)key at:(NSDate *)now {
     NSTimeInterval gap=self.rangeEnd?[now timeIntervalSinceDate:self.rangeEnd]:0;
@@ -649,7 +701,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
         if(self.owned) [self performAutoStop:@"state_unknown"];
         return;
     }
-    BOOL authInstalled=[NSFileManager.defaultManager fileExistsAtPath:@"/etc/sudoers.d/keepclam"];
+    BOOL authInstalled=[NSFileManager.defaultManager fileExistsAtPath:SudoersPath()];
     self.authItem.title=authInstalled?L(@"auth.on"):L(@"auth.off");
     self.toggleItem.title=enabled?L(@"menu.disable"):L(@"menu.enable");
     self.item.button.title=enabled?@"● KeepClam":@"○ KeepClam";
@@ -733,10 +785,10 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 - (void)authAction:(NSMenuItem *)sender {
     if([self sudoersFilePresent]) {
         NSAlert *a=[NSAlert new]; a.messageText=L(@"auth.installed.title");
-        a.informativeText=[NSString stringWithFormat:L(@"auth.installed.view.body"),[self ruleText]];
+        a.informativeText=[NSString stringWithFormat:L(@"auth.installed.view.body"),SudoersPath(),[self ruleText],SudoersPath()];
         [a runModal]; return;
     }
-    NSString *cmd=[NSString stringWithFormat:@"tmp=$(/usr/bin/mktemp); trap '/bin/rm -f \"$tmp\"' EXIT; /usr/bin/printf '%%s\\n' %@ > \"$tmp\" && /usr/sbin/visudo -cf \"$tmp\" >/dev/null && /usr/bin/install -m 0440 -o root -g wheel \"$tmp\" /etc/sudoers.d/keepclam",Quote([self ruleText])];
+    NSString *cmd=[NSString stringWithFormat:@"tmp=$(/usr/bin/mktemp); trap '/bin/rm -f \"$tmp\"' EXIT; /usr/bin/printf '%%s\\n' %@ > \"$tmp\" && /usr/sbin/visudo -cf \"$tmp\" >/dev/null && /usr/bin/install -m 0440 -o root -g wheel \"$tmp\" %@",Quote([self ruleText]),SudoersPath()];
     if([self authorize:cmd] && [self sudoersFilePresent]) {
         [self flush]; [self log:@"sudoers_installed"];
         NSAlert *a=[NSAlert new]; a.messageText=L(@"auth.installed.title"); a.informativeText=L(@"auth.installed.body"); [a runModal];
@@ -810,7 +862,10 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
         BOOL ok=StopGuard()==0;
         dispatch_async(dispatch_get_main_queue(), ^{
             self.busy=NO;
-            if(ok) { [self flush]; if(self.active) [self log:@"session_ended_application_quit"]; }
+            if(ok) {
+                [self flush];
+                if(self.active) { [self log:@"session_ended_application_quit"]; [self flush]; } // drain the end record before replying
+            }
             else { NSAlert *a=[NSAlert new]; a.messageText=L(@"quit.restorefail.title"); a.informativeText=L(@"quit.restorefail.body"); [a runModal]; }
             [sender replyToApplicationShouldTerminate:ok];
         });

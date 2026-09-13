@@ -7,6 +7,7 @@ int main(void) {
         NSString *dir=[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
         App *app=[App new]; app.logPath=[dir stringByAppendingPathComponent:@"test.log"];
+        app.worker=dispatch_queue_create("test.log",DISPATCH_QUEUE_SERIAL);
         NSDate *start=[NSDate dateWithTimeIntervalSince1970:1000];
         for(int i=0;i<180;i++) [app sample:@"lid=closed network_cached=reachable thermal=nominal" at:[start dateByAddingTimeInterval:i*5]];
         CHECK(app.count==180);
@@ -25,6 +26,15 @@ int main(void) {
         [large writeToFile:app.logPath atomically:YES]; Append(app.logPath,@"new\n");
         CHECK([NSFileManager.defaultManager fileExistsAtPath:[app.logPath stringByAppendingString:@".1"]]);
         CHECK([[NSString stringWithContentsOfFile:app.logPath encoding:NSUTF8StringEncoding error:nil] isEqual:@"new\n"]);
+        // The resident fd survives an external inode swap and rotation, and stays 0600.
+        [large writeToFile:app.logPath atomically:YES];
+        [app log:@"rotated"];
+        [app flush];
+        CHECK([NSFileManager.defaultManager fileExistsAtPath:[app.logPath stringByAppendingString:@".1"]]);
+        text=[NSString stringWithContentsOfFile:app.logPath encoding:NSUTF8StringEncoding error:nil];
+        CHECK([text containsString:@"rotated"]);
+        struct stat rmode; CHECK(stat(app.logPath.fileSystemRepresentation,&rmode)==0);
+        CHECK((rmode.st_mode & 0777)==0600);
 
         // Unknown reads must never be reported as successfully disabled.
         CHECK(DecodeSleepState(NULL)==SleepUnknown);
@@ -99,6 +109,7 @@ int main(void) {
         app.rangeStart=[NSDate dateWithTimeIntervalSinceNow:-10]; app.rangeEnd=[NSDate date];
         [app endSessionWithReason:@"session_ended"];
         CHECK(app.owned==NO && app.sessionDeadline==nil && app.lastLog==nil && app.networkTime==nil);
+        [app flush]; // drain: the end record is queued, not synchronous
         text=[NSString stringWithContentsOfFile:app.logPath encoding:NSUTF8StringEncoding error:nil];
         CHECK([text containsString:@"session_ended"] && [text containsString:@"samples=2"]);
         // A fresh session must not inherit the previous session's throttle or network cache.
