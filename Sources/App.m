@@ -13,6 +13,7 @@
 #import <fcntl.h>
 #import <poll.h>
 #import <errno.h>
+#import <sys/wait.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import <libproc.h>
 
@@ -53,17 +54,21 @@ static void Append(NSString *path,NSString *line) {
     flock(lock,LOCK_UN); close(lock);
 }
 
-static NSString *Run(NSString *path, NSArray *args) {
+// Runs a tool to completion and returns merged stdout/stderr. `limit` bounds a runaway
+// task with SIGKILL; outStatus receives its termination status (-1 when launch failed).
+static NSString *RunLimit(NSString *path,NSArray *args,NSTimeInterval limit,int *outStatus) {
     NSTask *task=[NSTask new]; task.launchPath=path; task.arguments=args;
     NSPipe *pipe=[NSPipe pipe]; task.standardOutput=pipe; task.standardError=pipe;
     @try { [task launch];
         dispatch_source_t timeout=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
-        dispatch_source_set_timer(timeout,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),DISPATCH_TIME_FOREVER,0);
+        dispatch_source_set_timer(timeout,dispatch_time(DISPATCH_TIME_NOW,(int64_t)(limit*NSEC_PER_SEC)),DISPATCH_TIME_FOREVER,0);
         dispatch_source_set_event_handler(timeout,^{ if(task.running) kill(task.processIdentifier,SIGKILL); }); dispatch_resume(timeout);
         NSData *data=[pipe.fileHandleForReading readDataToEndOfFile]; [task waitUntilExit]; dispatch_source_cancel(timeout);
+        if(outStatus) *outStatus=task.terminationStatus;
         return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
-    } @catch(NSException *e) { return @"unknown"; }
+    } @catch(NSException *e) { if(outStatus) *outStatus=-1; return @"unknown"; }
 }
+static NSString *Run(NSString *path, NSArray *args) { return RunLimit(path,args,10,NULL); }
 typedef NS_ENUM(NSInteger, SleepState) { SleepUnknown=-1, SleepOff=0, SleepOn=1 };
 static SleepState DecodeSleepState(CFTypeRef value) {
     if(!value || CFGetTypeID(value)!=CFBooleanGetTypeID()) return SleepUnknown;
@@ -150,6 +155,8 @@ static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
             @"notify.autostop.lowpower":@[@"系统进入低电量模式，已恢复合盖睡眠。",@"Low Power Mode activated; normal sleep restored."],
             @"notify.autostop.fail":@[@"自动结束未能恢复系统睡眠，请手动执行：sudo pmset -a disablesleep 0",@"Auto-stop could not restore sleep. Please run: sudo pmset -a disablesleep 0"],
             @"notify.thermal":@[@"过热保护已触发，已尝试恢复睡眠并请求休眠，请查看日志确认结果",@"Overheat protection attempted to restore sleep and requested sleep now; check logs for the result"],
+            @"notify.thermal.restorefail":@[@"过热保护已触发，但合盖睡眠未能确认恢复。请手动执行：sudo pmset -a disablesleep 0",@"Overheat protection triggered, but normal lid sleep could not be confirmed restored. Please run: sudo pmset -a disablesleep 0"],
+            @"notify.thermal.sleepfail":@[@"过热保护已触发，但系统未能休眠，机器仍在运行。请查看运行日志确认原因。",@"Overheat protection triggered, but the system did not sleep and the machine is still running. Check the logs."],
         };
     });
     return t;
@@ -243,9 +250,12 @@ static NSString *LockPath(void){ return [NSHomeDirectory() stringByAppendingPath
 static void GuardLog(NSString *event) {
     Append(LogFilePath(),[NSString stringWithFormat:@"%@ | %@ | thermal=%@\n",NSDate.date,event,ThermalToken()]);
 }
-static void GuardNotify(void) {
-    Run(@"/usr/bin/osascript",@[@"-e",[NSString stringWithFormat:@"display notification \"%@\" with title \"KeepClam\" sound name \"Glass\"",L(@"notify.thermal")]]);
+// The guard has no bundle, so notifications go through osascript. Its cold start can be
+// slow and the restore actions must not wait on it: bound it hard, then move on.
+static void GuardNotifyText(NSString *body) {
+    RunLimit(@"/usr/bin/osascript",@[@"-e",[NSString stringWithFormat:@"display notification \"%@\" with title \"KeepClam\" sound name \"Glass\"",body]],2,NULL);
 }
+static void GuardNotify(void) { GuardNotifyText(L(@"notify.thermal")); }
 
 // User-space protection process. Restores sleep via the whitelist (sudo -n) or the admin prompt.
 static volatile sig_atomic_t stopping=0;
@@ -272,10 +282,23 @@ static int Guard(pid_t parent,int ready) {
         NSInteger state=NSProcessInfo.processInfo.thermalState;
         unknown=state<0 ? unknown+1 : 0;
         if(state>=2 || unknown>=3) {
-            BOOL restored=SetSleepDisabledNoPrompt(NO);
-            Run(@"/usr/bin/pmset",@[@"sleepnow"]);
-            GuardLog(restored?@"PROTECTION_TRIGGER: sleep restored, sleepnow requested":@"PROTECTION_RESTORE_FAILED: sleepnow requested");
+            // Evidence first: the alarm is fsynced before anything can interrupt this path,
+            // including the sleep this trigger is about to request.
+            GuardLog(@"PROTECTION_TRIGGER");
+            // The notification must reach the center before sleep can take effect.
             GuardNotify();
+            BOOL restored=SetSleepDisabledNoPrompt(NO);
+            if(!restored) {
+                GuardLog(@"PROTECTION_RESTORE_FAILED: could not restore lid sleep");
+                GuardNotifyText(L(@"notify.thermal.restorefail"));
+            }
+            int sleepStatus=-1;
+            RunLimit(@"/usr/bin/pmset",@[@"sleepnow"],10,&sleepStatus);
+            if(sleepStatus==0) GuardLog(@"PROTECTION_SLEEPNOW: sleep now requested");
+            else {
+                GuardLog([NSString stringWithFormat:@"PROTECTION_SLEEPNOW_FAILED: pmset sleepnow exited with status %d",sleepStatus]);
+                GuardNotifyText(L(@"notify.thermal.sleepfail"));
+            }
             close(lock);
             return 0;
         }
@@ -364,6 +387,9 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 @property NSDate *networkTime;
 @property NSString *networkResult;
 @property pid_t guardPID;
+@property unsigned long long guardStartSec;
+@property unsigned long long guardStartUsec;
+@property dispatch_source_t guardProcSource;
 @property NSUInteger generation;
 @property NSDate *sessionDeadline;
 @end
@@ -531,6 +557,50 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     [self log:[NSString stringWithFormat:@"battery_floor=%ld%%",(long)sender.tag]];
     [self tick:nil];
 }
+// Liveness is identity-based, not kill(pid,0): a zombie answers kill(pid,0) as alive and
+// PIDs get reused, so require the exact start-time identity recorded at guard start.
+- (BOOL)guardIsAlive {
+    return self.guardPID>0 && GuardIdentityMatches(self.guardPID,self.guardStartSec,self.guardStartUsec);
+}
+// Shared by the exit-event handler and the periodic tick: record the loss, tell the user,
+// and self-heal — this app holds the same whitelist, so it restores sleep itself.
+- (void)handleGuardMissing {
+    self.owned=NO; self.sessionDeadline=nil;
+    [self log:@"guard_missing: protection unavailable"];
+    [self notify:L(@"notify.guard_missing")];
+    if(self.busy) return;
+    self.busy=YES; self.generation++;
+    dispatch_async(self.worker, ^{
+        BOOL restored=SetSleepDisabledNoPrompt(NO);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.busy=NO;
+            if(restored) [self log:@"guard_missing_restored"];
+            else {
+                [self log:@"guard_missing_restore_failed: sudo -n pmset could not restore sleep"];
+                [self notify:L(@"notify.guard_missing_fail")];
+            }
+        });
+    });
+}
+// Watches the guard for exit so it is reaped promptly (no zombie) and a mid-tick loss is
+// handled immediately. Re-arming cancels the previous source.
+- (void)watchGuardExit {
+    dispatch_source_t old=self.guardProcSource;
+    self.guardProcSource=nil;
+    if(old) dispatch_source_cancel(old);
+    pid_t pid=self.guardPID;
+    if(pid<=0) return;
+    dispatch_source_t source=dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC,(uintptr_t)pid,DISPATCH_PROC_EXIT,dispatch_get_main_queue());
+    dispatch_source_set_event_handler(source,^{
+        if(self.guardProcSource==source) { self.guardProcSource=nil; dispatch_source_cancel(source); }
+        int status=0; pid_t reaped;
+        do { reaped=waitpid(pid,&status,WNOHANG); } while(reaped<0 && errno==EINTR);
+        // A planned teardown owns the outcome; only an unattended exit self-heals here.
+        if(self.guardPID==pid && self.active && self.owned && !self.busy) [self handleGuardMissing];
+    });
+    dispatch_resume(source);
+    self.guardProcSource=source;
+}
 - (void)tick:(id)sender {
     if(self.busy || self.sampling) return;
     self.sampling=YES;
@@ -556,21 +626,8 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     if(self.active && !enabled) { [self flush]; [self log:@"session_ended"]; self.owned=NO; self.lastLog=nil; self.networkTime=nil; self.sessionDeadline=nil; }
     if(!self.active && enabled) [self log:@"session_observed_enabled"];
     self.active=enabled;
-    if(enabled && self.owned && kill(self.guardPID,0)!=0 && errno!=EPERM) {
-        self.owned=NO; self.sessionDeadline=nil; [self log:@"guard_missing: protection unavailable"];
-        [self notify:L(@"notify.guard_missing")];
-        // The app outlives the guard and holds the same whitelist, so it retries the restore itself.
-        if(!self.busy) { self.busy=YES; self.generation++; dispatch_async(self.worker, ^{
-            BOOL restored=SetSleepDisabledNoPrompt(NO);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self.busy=NO;
-                if(restored) [self log:@"guard_missing_restored"];
-                else {
-                    [self log:@"guard_missing_restore_failed: sudo -n pmset could not restore sleep"];
-                    [self notify:L(@"notify.guard_missing_fail")];
-                }
-            });
-        }); }
+    if(enabled && self.owned && ![self guardIsAlive]) {
+        [self handleGuardMissing];
         return;
     }
     if(!enabled) self.detailItem.title=L(@"menu.detail.idle");
@@ -666,17 +723,26 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     self.busy=YES; self.generation++;
     dispatch_async(self.worker, ^{
         pid_t pid=-1; BOOL ok=NO; NSString *problem=nil; int stopResult=0;
+        unsigned long long startSec=0,startUsec=0;
         if(enable) {
             if(SetSleepDisabled(YES)) {
                 pid=StartGuard(getpid()); ok=pid>0;
-                if(!ok) problem=SetSleepDisabled(NO)?@"toggle.fail.guard.body":@"toggle.restorefail.body";
+                if(ok) {
+                    // Record the guard's start-time identity now, before the PID could ever be reused.
+                    struct proc_bsdinfo info={0};
+                    if(proc_pidinfo(pid,PROC_PIDTBSDINFO,0,&info,sizeof(info))==sizeof(info)) { startSec=info.pbi_start_tvsec; startUsec=info.pbi_start_tvusec; }
+                }
+                else problem=SetSleepDisabled(NO)?@"toggle.fail.guard.body":@"toggle.restorefail.body";
             } else problem=@"toggle.fail.pmset.body";
         } else { stopResult=StopGuard(); ok=stopResult==0; if(!ok) problem=@"toggle.restorefail.body"; }
         dispatch_async(dispatch_get_main_queue(), ^{
             self.busy=NO;
             if(ok) {
                 [self flush]; self.owned=enable; self.active=enable;
-                self.guardPID=enable?pid:0;
+                if(enable) {
+                    self.guardPID=pid; self.guardStartSec=startSec; self.guardStartUsec=startUsec;
+                    [self watchGuardExit];
+                } else self.guardPID=0;
                 self.sessionDeadline=enable && self.sessionDuration>0?[NSDate dateWithTimeIntervalSinceNow:self.sessionDuration]:nil;
                 [self log:enable?@"session_enabled_guard_confirmed":@"session_disabled"];
                 if(enable) { [self requestNotifyAuth]; if(![self sudoersFilePresent]) [self offerAuthInstallGuide]; }

@@ -48,6 +48,32 @@ int main(void) {
         CHECK(GuardIdentityMatches(getpid(),identity.pbi_start_tvsec,identity.pbi_start_tvusec));
         CHECK(!GuardIdentityMatches(getpid(),identity.pbi_start_tvsec+1,identity.pbi_start_tvusec));
         CHECK(!GuardIdentityMatches(0,0,0));
+        // Liveness requires the recorded identity, not mere PID existence (zombies, PID reuse).
+        app.guardPID=getpid(); app.guardStartSec=identity.pbi_start_tvsec; app.guardStartUsec=identity.pbi_start_tvusec;
+        CHECK([app guardIsAlive]);
+        app.guardStartSec=identity.pbi_start_tvsec+1;
+        CHECK(![app guardIsAlive]); // A same-user process that reused the PID is not the guard.
+        app.guardPID=0;
+        CHECK(![app guardIsAlive]);
+        // The PROC exit source reaps the exited child: no zombie is left behind.
+        app.owned=NO; app.active=NO; app.busy=NO; // never self-heal (never run pmset) in tests
+        pid_t victim=fork();
+        if(victim==0) _exit(0);
+        CHECK(victim>0);
+        usleep(200000); // let the child exit and linger as a zombie
+        app.guardPID=victim;
+        [app watchGuardExit];
+        NSDate *giveUp=[NSDate dateWithTimeIntervalSinceNow:5];
+        while(app.guardProcSource && [giveUp timeIntervalSinceNow]>0)
+            [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode beforeDate:giveUp];
+        CHECK(app.guardProcSource==nil);
+        errno=0;
+        int childStatus=0;
+        CHECK(waitpid(victim,&childStatus,WNOHANG)<0 && errno==ECHILD); // handler already reaped it
+        // The Run variant surfaces exit codes so tool failures are detectable.
+        int runStatus=-1;
+        RunLimit(@"/usr/bin/true",@[],10,&runStatus); CHECK(runStatus==0);
+        RunLimit(@"/usr/bin/false",@[],10,&runStatus); CHECK(runStatus!=0);
 
         // Auto-stop decision matrix.
         NSDate *now=[NSDate dateWithTimeIntervalSince1970:10000];
