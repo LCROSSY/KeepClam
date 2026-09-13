@@ -127,6 +127,23 @@ int main(void) {
         // The stuck-guard outcome means the settings were never touched: no emergency command there.
         CHECK(![Pair(@"toggle.guardstuck.body",1) containsString:@"disablesleep"]);
         CHECK(![Pair(@"toggle.guardstuck.body",2) containsString:@"disablesleep"]);
+        // Legacy log-dir migration: move when only the old exists, never touch a live new dir.
+        NSString *home=[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        NSString *oldLogs=[home stringByAppendingPathComponent:@"Library/Logs/LidAwake"];
+        NSString *newLogs=[home stringByAppendingPathComponent:@"Library/Logs/KeepClam"];
+        [NSFileManager.defaultManager createDirectoryAtPath:oldLogs withIntermediateDirectories:YES attributes:nil error:nil];
+        CHECK([@"old" writeToFile:[oldLogs stringByAppendingPathComponent:@"legacy.log"] atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+        CHECK(MigrateLegacyLogs(home));
+        CHECK([NSFileManager.defaultManager fileExistsAtPath:[newLogs stringByAppendingPathComponent:@"legacy.log"]]);
+        CHECK(![NSFileManager.defaultManager fileExistsAtPath:oldLogs]);
+        CHECK(!MigrateLegacyLogs(home)); // nothing left to move
+        [NSFileManager.defaultManager createDirectoryAtPath:oldLogs withIntermediateDirectories:YES attributes:nil error:nil];
+        CHECK([@"x" writeToFile:[oldLogs stringByAppendingPathComponent:@"legacy.log"] atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+        CHECK([@"sentinel" writeToFile:[newLogs stringByAppendingPathComponent:@"keep.log"] atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+        CHECK(!MigrateLegacyLogs(home)); // an existing new directory wins
+        NSString *newContent=[NSString stringWithContentsOfFile:[newLogs stringByAppendingPathComponent:@"keep.log"] encoding:NSUTF8StringEncoding error:nil];
+        CHECK([newContent isEqual:@"sentinel"]);
+        CHECK([NSFileManager.defaultManager fileExistsAtPath:[oldLogs stringByAppendingPathComponent:@"legacy.log"]]);
         // Remaining-time formatting boundaries, both languages.
         CHECK([@"59 分钟" isEqualToString:FormatInterval(59*60.0,1)]);
         CHECK([@"1 小时 0 分" isEqualToString:FormatInterval(60*60.0,1)]);

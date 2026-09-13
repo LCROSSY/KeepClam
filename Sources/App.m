@@ -160,6 +160,8 @@ static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
             @"notify.thermal":@[@"过热保护已触发，已尝试恢复睡眠并请求休眠，请查看日志确认结果",@"Overheat protection attempted to restore sleep and requested sleep now; check logs for the result"],
             @"notify.thermal.restorefail":@[@"过热保护已触发，但合盖睡眠未能确认恢复。请手动执行：sudo pmset -a disablesleep 0",@"Overheat protection triggered, but normal lid sleep could not be confirmed restored. Please run: sudo pmset -a disablesleep 0"],
             @"notify.thermal.sleepfail":@[@"过热保护已触发，但系统未能休眠，机器仍在运行。请查看运行日志确认原因。",@"Overheat protection triggered, but the system did not sleep and the machine is still running. Check the logs."],
+            @"legacy.running.title":@[@"检测到旧版 LidAwake 正在运行",@"Legacy LidAwake Is Still Running"],
+            @"legacy.running.body":@[@"请先退出旧版 LidAwake 再使用 KeepClam；两个应用同时运行会争用系统睡眠设置。本次启动未修改系统睡眠设置。",@"Quit the legacy LidAwake app before using KeepClam; running both would fight over the same system sleep settings. This launch changed no sleep settings."],
         };
     });
     return t;
@@ -259,6 +261,15 @@ static BOOL SetSleepDisabled(BOOL on) {
 
 static NSString *LogDir(void){ return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/KeepClam"]; }
 static NSString *LogFilePath(void){ return [LogDir() stringByAppendingPathComponent:@"运行日志.log"]; }
+// One-time migration of the legacy LidAwake log directory into the new location. Runs
+// before the new directory is ever created; an existing new directory always wins.
+// Returns whether a move happened.
+static BOOL MigrateLegacyLogs(NSString *home) {
+    NSString *old=[home stringByAppendingPathComponent:@"Library/Logs/LidAwake"];
+    NSString *new=[home stringByAppendingPathComponent:@"Library/Logs/KeepClam"];
+    if(![NSFileManager.defaultManager fileExistsAtPath:old] || [NSFileManager.defaultManager fileExistsAtPath:new]) return NO;
+    return [NSFileManager.defaultManager moveItemAtPath:old toPath:new error:nil];
+}
 // Single source of truth for the whitelist location; presence checks, install and
 // uninstall must all agree. Fixed literal with no shell metacharacters, so it can be
 // interpolated into the install command as-is.
@@ -559,6 +570,9 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     NSImage *appIcon=[[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"AppIcon" ofType:@"icns"]];
     if(appIcon) NSApp.applicationIconImage=appIcon;
+    // One-time migration of the legacy LidAwake log directory, strictly before this
+    // launch creates anything in the new location. An existing new directory wins.
+    MigrateLegacyLogs(NSHomeDirectory());
     NSString *dir=LogDir();
     PrivateDirectory(dir);
     self.logPath=LogFilePath();
@@ -572,6 +586,13 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     self.item=[NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
     self.item.button.title=@"◉ KeepClam";
     [self buildMenu];
+    // A still-running legacy LidAwake would fight this app over the same sleep settings.
+    if([Run(@"/usr/bin/pgrep",@[@"-x",@"LidAwake"]) length]) {
+        NSAlert *a=[NSAlert new];
+        a.messageText=L(@"legacy.running.title");
+        a.informativeText=L(@"legacy.running.body");
+        [a runModal];
+    }
     self.worker=dispatch_queue_create("io.github.keepclam.sampling",DISPATCH_QUEUE_SERIAL);
     self.timer=[NSTimer scheduledTimerWithTimeInterval:5 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [self tick:nil];
