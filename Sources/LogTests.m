@@ -85,22 +85,38 @@ int main(void) {
         RunLimit(@"/usr/bin/true",@[],10,&runStatus); CHECK(runStatus==0);
         RunLimit(@"/usr/bin/false",@[],10,&runStatus); CHECK(runStatus!=0);
 
-        // Auto-stop decision matrix.
+        // Brake decision matrix: BrakeReason(thermal, thermalUnknown, battery, batteryUnknown, onAC, lowPower, floor, deadline, now).
         NSDate *now=[NSDate dateWithTimeIntervalSince1970:10000];
         NSDate *past=[now dateByAddingTimeInterval:-1];
         NSDate *future=[now dateByAddingTimeInterval:600];
-        CHECK([AutoStopReason(80,YES,NO,20,past,now) isEqual:@"timer"]);
-        CHECK(AutoStopReason(80,YES,NO,20,future,now)==nil);
-        CHECK(AutoStopReason(80,NO,NO,20,future,now)==nil);
-        CHECK([AutoStopReason(10,NO,NO,20,future,now) isEqual:@"battery_floor"]);
-        CHECK(AutoStopReason(10,YES,NO,20,future,now)==nil);
-        CHECK([AutoStopReason(80,NO,YES,20,future,now) isEqual:@"low_power_mode"]);
-        CHECK(AutoStopReason(80,YES,YES,20,future,now)==nil);
-        CHECK(AutoStopReason(-1,NO,NO,20,future,now)==nil);
-        CHECK([AutoStopReason(50,NO,NO,50,future,now) isEqual:@"battery_floor"]);
-        CHECK(AutoStopReason(51,NO,NO,50,future,now)==nil);
-        CHECK([AutoStopReason(10,NO,YES,20,past,now) isEqual:@"timer"]);
-        CHECK(AutoStopReason(80,NO,NO,20,nil,now)==nil);
+        CHECK([BrakeReason(0,0,80,0,YES,NO,20,past,now) isEqual:@"timer"]);
+        CHECK(BrakeReason(0,0,80,0,YES,NO,20,future,now)==nil);
+        CHECK(BrakeReason(0,0,80,0,NO,NO,20,future,now)==nil);
+        CHECK([BrakeReason(0,0,10,0,NO,NO,20,future,now) isEqual:@"battery_floor"]);
+        CHECK(BrakeReason(0,0,10,0,YES,NO,20,future,now)==nil);
+        CHECK([BrakeReason(0,0,80,0,NO,YES,20,future,now) isEqual:@"low_power_mode"]);
+        CHECK(BrakeReason(0,0,80,0,YES,YES,20,future,now)==nil);
+        CHECK([BrakeReason(0,0,50,0,NO,NO,50,future,now) isEqual:@"battery_floor"]);
+        CHECK(BrakeReason(0,0,51,0,NO,NO,50,future,now)==nil);
+        CHECK([BrakeReason(0,0,10,0,NO,YES,20,past,now) isEqual:@"timer"]);
+        CHECK(BrakeReason(0,0,80,0,NO,NO,20,nil,now)==nil);
+        // Unreadable battery brakes only after three consecutive misses, and never on AC.
+        CHECK(BrakeReason(0,0,-1,2,NO,NO,20,nil,now)==nil);
+        CHECK([BrakeReason(0,0,-1,3,NO,NO,20,nil,now) isEqual:@"battery_unknown"]);
+        CHECK(BrakeReason(0,0,-1,3,YES,NO,20,nil,now)==nil);
+        // Thermal outranks every other reason.
+        CHECK(BrakeReason(1,0,80,0,YES,NO,20,nil,now)==nil);
+        CHECK([BrakeReason(2,0,10,3,NO,YES,20,past,now) isEqual:@"thermal"]);
+        CHECK(BrakeReason(-1,2,80,0,YES,NO,20,nil,now)==nil);
+        CHECK([BrakeReason(-1,3,10,0,NO,NO,20,past,now) isEqual:@"thermal_unknown"]);
+        // Exit codes round-trip; normal stops, startup failures and signals are not brakes.
+        for(NSString *r in BrakeReasons()) CHECK([BrakeReasonForExit(W_EXITCODE(BrakeExitCode(r),0)) isEqual:r]);
+        CHECK(BrakeReasonForExit(W_EXITCODE(0,0))==nil);
+        CHECK(BrakeReasonForExit(W_EXITCODE(3,0))==nil);
+        CHECK(BrakeReasonForExit(W_EXITCODE(10+(int)BrakeReasons().count,0))==nil);
+        CHECK(BrakeReasonForExit(SIGKILL)==nil);
+        // Every brake reason except thermal has its own notification head.
+        for(NSString *r in BrakeReasons()) if(![r isEqual:@"thermal"]) CHECK(StringsTable()[[@"brake." stringByAppendingString:r]]!=nil);
         // Session boundaries: teardown clears every per-session field and records the end.
         app.owned=YES; app.active=YES;
         app.sessionDeadline=[NSDate dateWithTimeIntervalSinceNow:60];
@@ -151,6 +167,16 @@ int main(void) {
         CHECK([@"59 min" isEqualToString:FormatInterval(59*60.0,2)]);
         CHECK([@"1 h 0 min" isEqualToString:FormatInterval(60*60.0,2)]);
         CHECK([@"1 min" isEqualToString:FormatInterval(30,2)]);
+        // Custom setting input: whole numbers inside the range only.
+        CHECK(ParseBoundedInteger(@"45",1,1440)==45);
+        CHECK(ParseBoundedInteger(@" 5 ",5,95)==5);
+        CHECK(ParseBoundedInteger(@"95",5,95)==95);
+        CHECK(ParseBoundedInteger(@"4",5,95)==-1);
+        CHECK(ParseBoundedInteger(@"96",5,95)==-1);
+        CHECK(ParseBoundedInteger(@"",1,1440)==-1);
+        CHECK(ParseBoundedInteger(@"1.5",1,1440)==-1);
+        CHECK(ParseBoundedInteger(@"20%",5,95)==-1);
+        CHECK(ParseBoundedInteger(@"abc",1,1440)==-1);
         // Every localization entry must have non-empty zh and en strings.
         for(NSString *key in StringsTable()) {
             NSArray<NSString *> *pair=StringsTable()[key];
@@ -159,7 +185,7 @@ int main(void) {
         // Exercise the live IOKit power-source bridge so malformed CF key usage cannot crash the app.
         BOOL onAC=NO; NSInteger battery=BatteryPercent(&onAC);
         CHECK(battery==-1 || (battery>=0 && battery<=100));
-        puts("PASS: aggregation, state changes, immediate errors, rotation, auto-stop reasons, power-source read");
+        puts("PASS: aggregation, state changes, immediate errors, rotation, brake reasons, exit codes, power-source read");
     }
     return 0;
 }

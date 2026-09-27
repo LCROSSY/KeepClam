@@ -85,6 +85,15 @@ static SleepState Enabled(void) {
     SleepState enabled=DecodeSleepState(value);
     if(value) CFRelease(value); IOObjectRelease(entry); return enabled;
 }
+// Lid state straight from the same registry entry; an unreadable value counts as open,
+// so a brake never forces sleep on a user who may be sitting in front of the machine.
+static BOOL LidClosed(void) {
+    io_registry_entry_t entry=IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching("IOPMrootDomain"));
+    if(!entry) return NO;
+    CFTypeRef value=IORegistryEntryCreateCFProperty(entry,CFSTR("AppleClamshellState"),kCFAllocatorDefault,0);
+    BOOL closed=value && CFGetTypeID(value)==CFBooleanGetTypeID() && CFBooleanGetValue(value);
+    if(value) CFRelease(value); IOObjectRelease(entry); return closed;
+}
 // In-app localization: table maps key -> @[zh, en]; LogTests enforces both entries are non-empty.
 static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
     static NSDictionary *t; static dispatch_once_t once;
@@ -104,10 +113,17 @@ static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
             @"menu.settings":@[@"设置",@"Settings"],
             @"menu.duration":@[@"自动结束",@"Auto-Stop"],
             @"dur.none":@[@"无限",@"Unlimited"],
-            @"dur.1800":@[@"30 分钟",@"30 min"],
             @"dur.3600":@[@"1 小时",@"1 h"],
             @"dur.7200":@[@"2 小时",@"2 h"],
             @"dur.14400":@[@"4 小时",@"4 h"],
+            @"menu.custom":@[@"自定义…",@"Custom…"],
+            @"menu.custom.value":@[@"自定义（%@）…",@"Custom (%@)…"],
+            @"custom.duration.title":@[@"自定义自动结束时间",@"Custom Auto-Stop Time"],
+            @"custom.floor.title":@[@"自定义电池下限",@"Custom Battery Floor"],
+            @"custom.range":@[@"请输入 %ld–%ld 之间的整数（单位：%@）",@"Enter a whole number from %ld to %ld (%@)"],
+            @"custom.unit.min":@[@"分钟",@"minutes"],
+            @"custom.ok":@[@"确定",@"OK"],
+            @"custom.cancel":@[@"取消",@"Cancel"],
             @"menu.floor":@[@"电池下限",@"Battery Floor"],
             @"menu.frequency":@[@"日志频率",@"Log Frequency"],
             @"freq.5":@[@"5 秒",@"5 s"],
@@ -153,10 +169,16 @@ static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
             @"help.close":@[@"关闭",@"Close"],
             @"notify.guard_missing":@[@"KeepClam 保护进程已丢失，正在自动恢复合盖睡眠。",@"KeepClam lost its guard; restoring normal sleep automatically."],
             @"notify.guard_missing_fail":@[@"合盖睡眠自动恢复失败，请手动执行：sudo pmset -a disablesleep 0",@"Automatic restore failed. Please run: sudo pmset -a disablesleep 0"],
-            @"notify.autostop.timer":@[@"定时时间已到，已恢复合盖睡眠。",@"Timer elapsed; normal sleep restored."],
-            @"notify.autostop.battery":@[@"电量已降至 %ld%% 下限，已恢复合盖睡眠。",@"Battery hit the %ld%% floor; normal sleep restored."],
-            @"notify.autostop.lowpower":@[@"系统进入低电量模式，已恢复合盖睡眠。",@"Low Power Mode activated; normal sleep restored."],
             @"notify.autostop.fail":@[@"自动结束未能恢复系统睡眠，请手动执行：sudo pmset -a disablesleep 0",@"Auto-stop could not restore sleep. Please run: sudo pmset -a disablesleep 0"],
+            @"brake.timer":@[@"定时时间已到，",@"Timer elapsed; "],
+            @"brake.battery_floor":@[@"电量已降至 %ld%% 下限，",@"Battery hit the %ld%% floor; "],
+            @"brake.battery_unknown":@[@"连续无法读取电量，",@"Battery level unreadable; "],
+            @"brake.low_power_mode":@[@"系统进入低电量模式，",@"Low Power Mode activated; "],
+            @"brake.thermal_unknown":@[@"连续无法读取系统热状态，",@"Thermal state unreadable; "],
+            @"brake.parent_exit":@[@"KeepClam 已退出，",@"KeepClam exited; "],
+            @"brake.sleep":@[@"已恢复睡眠并请求立即休眠。",@"normal sleep restored and sleep requested now."],
+            @"brake.awake":@[@"已恢复睡眠设置。",@"normal sleep restored."],
+            @"toggle.lowbattery":@[@"电量已不高于电池下限，不适合开启合盖运行",@"Battery is at or below the floor — not a good time to start lid-closed running"],
             @"notify.thermal":@[@"过热保护已触发，已尝试恢复睡眠并请求休眠，请查看日志确认结果",@"Overheat protection attempted to restore sleep and requested sleep now; check logs for the result"],
             @"notify.thermal.restorefail":@[@"过热保护已触发，但合盖睡眠未能确认恢复。请手动执行：sudo pmset -a disablesleep 0",@"Overheat protection triggered, but normal lid sleep could not be confirmed restored. Please run: sudo pmset -a disablesleep 0"],
             @"notify.thermal.sleepfail":@[@"过热保护已触发，但系统未能休眠，机器仍在运行。请查看运行日志确认原因。",@"Overheat protection triggered, but the system did not sleep and the machine is still running. Check the logs."],
@@ -222,14 +244,43 @@ static NSInteger BatteryPercent(BOOL *onAC) {
     return pct;
 }
 
-// Pure auto-stop decision shared by the app loop and tests. Returns a reason key or nil.
-static NSString *AutoStopReason(NSInteger batteryPct,BOOL onAC,BOOL lowPower,NSInteger floorPct,NSDate *deadline,NSDate *now) {
+static NSInteger BatteryFloorSetting(void) {
+    NSInteger f=[NSUserDefaults.standardUserDefaults integerForKey:@"battery_floor"]; return f>0?f:20;
+}
+// Pure parser for custom settings: a whole number in [min,max] (surrounding spaces
+// allowed), else -1.
+static NSInteger ParseBoundedInteger(NSString *text,NSInteger min,NSInteger max) {
+    NSScanner *scanner=[NSScanner scannerWithString:[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]];
+    NSInteger value=0;
+    if(![scanner scanInteger:&value] || !scanner.isAtEnd || value<min || value>max) return -1;
+    return value;
+}
+// Pure brake decision shared by the guard loop, the enable pre-check and tests. Returns a
+// stable reason token or nil. Unknown counts are consecutive failed reads; the battery
+// ones only matter on battery power.
+static NSString *BrakeReason(NSInteger thermal,unsigned thermalUnknown,NSInteger batteryPct,unsigned batteryUnknown,BOOL onAC,BOOL lowPower,NSInteger floorPct,NSDate *deadline,NSDate *now) {
+    if(thermal>=2) return @"thermal";
+    if(thermalUnknown>=3) return @"thermal_unknown";
     if(deadline && [now timeIntervalSinceDate:deadline]>=0) return @"timer";
     if(!onAC) {
         if(lowPower) return @"low_power_mode";
         if(batteryPct>=0 && batteryPct<=floorPct) return @"battery_floor";
+        if(batteryUnknown>=3) return @"battery_unknown";
     }
     return nil;
+}
+// The guard reports a planned brake through its exit code (10 + index), so the app can
+// tell it apart from a lost guard. Startup failures use 1-5 and never collide.
+static NSArray<NSString *> *BrakeReasons(void) {
+    return @[@"thermal",@"thermal_unknown",@"battery_floor",@"battery_unknown",@"low_power_mode",@"timer",@"parent_exit"];
+}
+static int BrakeExitCode(NSString *reason) {
+    NSUInteger i=[BrakeReasons() indexOfObject:reason]; return i==NSNotFound?1:10+(int)i;
+}
+static NSString *BrakeReasonForExit(int status) {
+    if(!WIFEXITED(status)) return nil;
+    int code=WEXITSTATUS(status);
+    return code>=10 && code<10+(int)BrakeReasons().count ? BrakeReasons()[code-10] : nil;
 }
 
 // Alert title keys for a failed toggle, routed by consequence. Disabling: 2 = the old
@@ -286,6 +337,39 @@ static void GuardNotifyText(NSString *body) {
 }
 static void GuardNotify(void) { GuardNotifyText(L(@"notify.thermal")); }
 
+// Single brake for every stop condition: evidence first, then notification, restore, and
+// sleep when the lid is closed (or on overheat). Clearing SleepDisabled alone does not
+// re-trigger lid sleep — the system only falls back to idle sleep, which a running task's
+// assertion blocks — so sleep must be requested explicitly. Returns the exit code.
+static int Brake(NSString *reason,int lock) {
+    // Evidence first: the alarm is fsynced before anything can interrupt this path,
+    // including the sleep this trigger is about to request.
+    GuardLog([NSString stringWithFormat:@"PROTECTION_TRIGGER reason=%@",reason]);
+    BOOL sleepNow=[reason isEqualToString:@"thermal"] || LidClosed();
+    // The notification must reach the center before sleep can take effect.
+    if([reason isEqualToString:@"thermal"]) GuardNotify();
+    else {
+        NSString *head=[reason isEqualToString:@"battery_floor"]?[NSString stringWithFormat:L(@"brake.battery_floor"),(long)BatteryFloorSetting()]:L([@"brake." stringByAppendingString:reason]);
+        GuardNotifyText([head stringByAppendingString:L(sleepNow?@"brake.sleep":@"brake.awake")]);
+    }
+    BOOL restored=SetSleepDisabledNoPrompt(NO);
+    if(!restored) {
+        GuardLog(@"PROTECTION_RESTORE_FAILED: could not restore lid sleep");
+        GuardNotifyText(L(@"notify.thermal.restorefail"));
+    }
+    if(sleepNow) {
+        int sleepStatus=-1;
+        RunLimit(@"/usr/bin/pmset",@[@"sleepnow"],10,&sleepStatus);
+        if(sleepStatus==0) GuardLog(@"PROTECTION_SLEEPNOW: sleep now requested");
+        else {
+            GuardLog([NSString stringWithFormat:@"PROTECTION_SLEEPNOW_FAILED: pmset sleepnow exited with status %d",sleepStatus]);
+            GuardNotifyText(L(@"notify.thermal.sleepfail"));
+        }
+    } else GuardLog(@"PROTECTION_RESTORED: lid open, no sleep requested");
+    close(lock);
+    return BrakeExitCode(reason);
+}
+
 // User-space protection process. Restores sleep via the whitelist (sudo -n) or the admin prompt.
 static volatile sig_atomic_t stopping=0;
 static void Stop(int sig) { stopping=1; }
@@ -306,31 +390,19 @@ static int Guard(pid_t parent,int ready) {
     if(initial<0 || initial>=2) { close(lock); close(ready); return 3; }
     if(Enabled()!=SleepOn) { close(lock); close(ready); return 4; }
     if(ready>=0) { write(ready,"1",1); close(ready); }
-    unsigned unknown=0;
-    while(!stopping && getppid()==parent && Enabled()==SleepOn) {
-        NSInteger state=NSProcessInfo.processInfo.thermalState;
-        unknown=state<0 ? unknown+1 : 0;
-        if(state>=2 || unknown>=3) {
-            // Evidence first: the alarm is fsynced before anything can interrupt this path,
-            // including the sleep this trigger is about to request.
-            GuardLog(@"PROTECTION_TRIGGER");
-            // The notification must reach the center before sleep can take effect.
-            GuardNotify();
-            BOOL restored=SetSleepDisabledNoPrompt(NO);
-            if(!restored) {
-                GuardLog(@"PROTECTION_RESTORE_FAILED: could not restore lid sleep");
-                GuardNotifyText(L(@"notify.thermal.restorefail"));
-            }
-            int sleepStatus=-1;
-            RunLimit(@"/usr/bin/pmset",@[@"sleepnow"],10,&sleepStatus);
-            if(sleepStatus==0) GuardLog(@"PROTECTION_SLEEPNOW: sleep now requested");
-            else {
-                GuardLog([NSString stringWithFormat:@"PROTECTION_SLEEPNOW_FAILED: pmset sleepnow exited with status %d",sleepStatus]);
-                GuardNotifyText(L(@"notify.thermal.sleepfail"));
-            }
-            close(lock);
-            return 0;
-        }
+    unsigned thermalUnknown=0,batteryUnknown=0;
+    while(!stopping && Enabled()==SleepOn) @autoreleasepool { // drained per cycle: sessions run for hours
+        if(getppid()!=parent) return Brake(@"parent_exit",lock);
+        NSInteger thermal=NSProcessInfo.processInfo.thermalState;
+        thermalUnknown=thermal<0 ? thermalUnknown+1 : 0;
+        BOOL onAC=NO; NSInteger battery=BatteryPercent(&onAC);
+        batteryUnknown=(!onAC && battery<0) ? batteryUnknown+1 : 0;
+        // Settings are shared through the app's preferences, so changes apply mid-session.
+        CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+        NSTimeInterval deadline=[NSUserDefaults.standardUserDefaults doubleForKey:@"session_deadline"];
+        NSString *reason=BrakeReason(thermal,thermalUnknown,battery,batteryUnknown,onAC,NSProcessInfo.processInfo.isLowPowerModeEnabled,
+                                     BatteryFloorSetting(),deadline>0?[NSDate dateWithTimeIntervalSince1970:deadline]:nil,NSDate.date);
+        if(reason) return Brake(reason,lock);
         sleep(5);
     }
     BOOL restored=SetSleepDisabledNoPrompt(NO);
@@ -421,7 +493,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 @property unsigned long long guardStartUsec;
 @property dispatch_source_t guardProcSource;
 @property NSUInteger generation;
-@property NSDate *sessionDeadline;
+@property (nonatomic) NSDate *sessionDeadline;
 @end
 
 @implementation App
@@ -430,7 +502,13 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     return self;
 }
 - (NSInteger)sessionDuration { return MAX(0,[NSUserDefaults.standardUserDefaults integerForKey:@"duration"]); }
-- (NSInteger)batteryFloor { NSInteger f=[NSUserDefaults.standardUserDefaults integerForKey:@"battery_floor"]; return f>0?f:20; }
+- (NSInteger)batteryFloor { return BatteryFloorSetting(); }
+// The guard enforces the deadline, so every assignment is mirrored into the shared
+// preferences it reads each cycle (0 = no deadline).
+- (void)setSessionDeadline:(NSDate *)deadline {
+    _sessionDeadline=deadline;
+    [NSUserDefaults.standardUserDefaults setDouble:deadline?deadline.timeIntervalSince1970:0 forKey:@"session_deadline"];
+}
 - (NSString *)ruleText {
     return [NSString stringWithFormat:@"%@ ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1",NSUserName()];
 }
@@ -530,17 +608,25 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     self.loginItem=[self add:L(@"menu.login") action:@selector(loginChanged:) menu:sm];
     [self refreshLogin];
     NSMenuItem *duration=[self add:L(@"menu.duration") action:nil menu:sm]; NSMenu *dur=[NSMenu new];
-    for(NSNumber *n in @[@0,@1800,@3600,@7200,@14400]) {
-        NSString *key=n.intValue==0?@"dur.none":(n.intValue==1800?@"dur.1800":(n.intValue==3600?@"dur.3600":(n.intValue==7200?@"dur.7200":@"dur.14400")));
-        NSMenuItem *i=[self add:L(key) action:@selector(durationChanged:) menu:dur]; i.tag=n.integerValue;
+    NSArray *durations=@[@0,@3600,@7200,@14400];
+    for(NSNumber *n in durations) {
+        NSMenuItem *i=[self add:L([NSString stringWithFormat:@"dur.%@",n.intValue==0?@"none":n.stringValue]) action:@selector(durationChanged:) menu:dur]; i.tag=n.integerValue;
         i.state=i.tag==self.sessionDuration?NSControlStateValueOn:NSControlStateValueOff;
     }
+    // A non-preset value is shown on the custom item itself, so the checkmark never disappears.
+    BOOL customDuration=![durations containsObject:@(self.sessionDuration)];
+    NSMenuItem *durCustom=[self add:customDuration?[NSString stringWithFormat:L(@"menu.custom.value"),FormatInterval(self.sessionDuration,LangIndex())]:L(@"menu.custom") action:@selector(customDuration:) menu:dur];
+    durCustom.state=customDuration?NSControlStateValueOn:NSControlStateValueOff;
     duration.submenu=dur;
     NSMenuItem *floorItem=[self add:L(@"menu.floor") action:nil menu:sm]; NSMenu *flr=[NSMenu new];
-    for(NSNumber *n in @[@5,@10,@15,@20,@30,@50]) {
+    NSArray *floors=@[@10,@20,@30];
+    for(NSNumber *n in floors) {
         NSMenuItem *i=[self add:[NSString stringWithFormat:@"%ld%%",(long)n.integerValue] action:@selector(floorChanged:) menu:flr]; i.tag=n.integerValue;
         i.state=i.tag==self.batteryFloor?NSControlStateValueOn:NSControlStateValueOff;
     }
+    BOOL customFloor=![floors containsObject:@(self.batteryFloor)];
+    NSMenuItem *flrCustom=[self add:customFloor?[NSString stringWithFormat:L(@"menu.custom.value"),[NSString stringWithFormat:@"%ld%%",(long)self.batteryFloor]]:L(@"menu.custom") action:@selector(customFloor:) menu:flr];
+    flrCustom.state=customFloor?NSControlStateValueOn:NSControlStateValueOff;
     floorItem.submenu=flr;
     NSMenuItem *frequency=[self add:L(@"menu.frequency") action:nil menu:sm]; NSMenu *sub=[NSMenu new];
     for(NSNumber *n in @[@5,@60,@900]) {
@@ -626,20 +712,47 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     [self buildMenu];
     [self tick:nil];
 }
-- (void)durationChanged:(NSMenuItem *)sender {
-    [NSUserDefaults.standardUserDefaults setInteger:sender.tag forKey:@"duration"];
-    for(NSMenuItem *i in sender.menu.itemArray) i.state=i==sender?NSControlStateValueOn:NSControlStateValueOff;
-    if(self.active && self.owned) self.sessionDeadline=sender.tag>0?[NSDate dateWithTimeIntervalSinceNow:sender.tag]:nil;
+- (void)durationChanged:(NSMenuItem *)sender { [self applyDuration:sender.tag]; }
+- (void)floorChanged:(NSMenuItem *)sender { [self applyFloor:sender.tag]; }
+// Presets and custom values share one apply path; the menu is rebuilt so the checkmark
+// and the custom item's label always reflect the stored value.
+- (void)applyDuration:(NSInteger)seconds {
+    [NSUserDefaults.standardUserDefaults setInteger:seconds forKey:@"duration"];
+    if(self.active && self.owned) self.sessionDeadline=seconds>0?[NSDate dateWithTimeIntervalSinceNow:seconds]:nil;
     [self flush];
-    [self log:[NSString stringWithFormat:@"session_duration=%ld",(long)sender.tag]];
+    [self log:[NSString stringWithFormat:@"session_duration=%ld",(long)seconds]];
+    [self buildMenu];
     [self tick:nil];
 }
-- (void)floorChanged:(NSMenuItem *)sender {
-    [NSUserDefaults.standardUserDefaults setInteger:sender.tag forKey:@"battery_floor"];
-    for(NSMenuItem *i in sender.menu.itemArray) i.state=i==sender?NSControlStateValueOn:NSControlStateValueOff;
+- (void)applyFloor:(NSInteger)percent {
+    [NSUserDefaults.standardUserDefaults setInteger:percent forKey:@"battery_floor"];
     [self flush];
-    [self log:[NSString stringWithFormat:@"battery_floor=%ld%%",(long)sender.tag]];
+    [self log:[NSString stringWithFormat:@"battery_floor=%ld%%",(long)percent]];
+    [self buildMenu];
     [self tick:nil];
+}
+// Asks for one integer in [min,max]; returns -1 on cancel or invalid input (after saying why).
+- (NSInteger)askNumber:(NSString *)title unit:(NSString *)unit min:(NSInteger)min max:(NSInteger)max current:(NSInteger)current {
+    NSAlert *a=[NSAlert new]; a.messageText=title;
+    a.informativeText=[NSString stringWithFormat:L(@"custom.range"),(long)min,(long)max,unit];
+    NSTextField *field=[[NSTextField alloc] initWithFrame:NSMakeRect(0,0,120,24)];
+    if(current>0) field.stringValue=[NSString stringWithFormat:@"%ld",(long)current];
+    a.accessoryView=field;
+    [a addButtonWithTitle:L(@"custom.ok")]; [a addButtonWithTitle:L(@"custom.cancel")];
+    [NSApp activateIgnoringOtherApps:YES];
+    a.window.initialFirstResponder=field;
+    if([a runModal]!=NSAlertFirstButtonReturn) return -1;
+    NSInteger value=ParseBoundedInteger(field.stringValue,min,max);
+    if(value<0) { NSAlert *bad=[NSAlert new]; bad.messageText=a.informativeText; [bad runModal]; }
+    return value;
+}
+- (void)customDuration:(id)sender {
+    NSInteger mins=[self askNumber:L(@"custom.duration.title") unit:L(@"custom.unit.min") min:1 max:1440 current:self.sessionDuration/60];
+    if(mins>0) [self applyDuration:mins*60];
+}
+- (void)customFloor:(id)sender {
+    NSInteger pct=[self askNumber:L(@"custom.floor.title") unit:@"%" min:5 max:95 current:self.batteryFloor];
+    if(pct>0) [self applyFloor:pct];
 }
 // Single session teardown: persist pending summaries, record why the session ended,
 // then reset every per-session field. All end paths (tick's external close, auto-stop,
@@ -699,8 +812,17 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
         if(self.guardProcSource==source) { self.guardProcSource=nil; dispatch_source_cancel(source); }
         int status=0; pid_t reaped;
         do { reaped=waitpid(pid,&status,WNOHANG); } while(reaped<0 && errno==EINTR);
+        if(self.guardPID!=pid || !self.active || !self.owned || self.busy) return;
+        // A planned brake: the guard already restored, slept and notified; only record it.
+        NSString *brake=reaped==pid?BrakeReasonForExit(status):nil;
+        if(brake) {
+            [self endSessionWithReason:[NSString stringWithFormat:@"session_ended reason=%@",brake]];
+            self.active=NO;
+            [self tick:nil];
+            return;
+        }
         // A planned teardown owns the outcome; only an unattended exit self-heals here.
-        if(self.guardPID==pid && self.active && self.owned && !self.busy) [self handleGuardMissing];
+        [self handleGuardMissing];
     });
     dispatch_resume(source);
     self.guardProcSource=source;
@@ -738,11 +860,6 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     else if(self.owned && self.sessionDeadline) self.detailItem.title=[NSString stringWithFormat:L(@"menu.detail.session.timed"),FormatInterval([self.sessionDeadline timeIntervalSinceNow],LangIndex())];
     else if(self.owned) self.detailItem.title=L(@"menu.detail.session.open");
     else self.detailItem.title=L(@"menu.detail.external");
-    if(enabled && self.owned) {
-        BOOL onAC=NO; NSInteger batt=BatteryPercent(&onAC);
-        NSString *reason=AutoStopReason(batt,onAC,NSProcessInfo.processInfo.isLowPowerModeEnabled,self.batteryFloor,self.sessionDeadline,NSDate.date);
-        if(reason) { [self performAutoStop:reason]; return; }
-    }
     if(enabled && (!self.lastLog || -self.lastLog.timeIntervalSinceNow>=[NSUserDefaults.standardUserDefaults integerForKey:@"interval"])) {
         self.sampling=YES;
         BOOL probe=!self.networkTime || -self.networkTime.timeIntervalSinceNow>=60;
@@ -761,17 +878,15 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     });
     });
 }
+// Only for a sleep state the app can no longer read; every other stop condition is a
+// guard brake (see Brake).
 - (void)performAutoStop:(NSString *)reason {
     if(self.busy) return;
     self.busy=YES; self.generation++;
     [self flush];
     [self log:[NSString stringWithFormat:@"auto_stop=%@",reason]];
     [self endSessionWithReason:nil];
-    NSString *text;
-    if([reason isEqualToString:@"timer"]) text=L(@"notify.autostop.timer");
-    else if([reason isEqualToString:@"battery_floor"]) text=[NSString stringWithFormat:L(@"notify.autostop.battery"),(long)self.batteryFloor];
-    else if([reason isEqualToString:@"state_unknown"]) text=L(@"state.unknown");
-    else text=L(@"notify.autostop.lowpower");
+    NSString *text=L(@"state.unknown");
     // Guard teardown can block for tens of seconds; keep it off the main thread so the menu stays responsive.
     dispatch_async(self.worker, ^{
         int r=StopGuardNoPrompt();
@@ -820,10 +935,17 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     if(self.busy) return;
     BOOL enable=Enabled()==SleepOff;
     if(enable) {
-        BOOL onAC=NO; BatteryPercent(&onAC);
-        NSString *problem=(!onAC && NSProcessInfo.processInfo.isLowPowerModeEnabled)?@"toggle.lowpower":nil;
-        if(NSProcessInfo.processInfo.thermalState<0 || NSProcessInfo.processInfo.thermalState>=2) problem=@"toggle.hot";
+        // Same decision the guard applies, so a session never starts already due to brake.
+        BOOL onAC=NO; NSInteger batt=BatteryPercent(&onAC);
+        NSInteger thermal=NSProcessInfo.processInfo.thermalState;
+        NSString *reason=BrakeReason(thermal,thermal<0?3:0,batt,0,onAC,NSProcessInfo.processInfo.isLowPowerModeEnabled,self.batteryFloor,nil,NSDate.date);
+        NSString *problem=nil;
+        if([reason hasPrefix:@"thermal"]) problem=@"toggle.hot";
+        else if([reason isEqualToString:@"low_power_mode"]) problem=@"toggle.lowpower";
+        else if([reason isEqualToString:@"battery_floor"]) problem=@"toggle.lowbattery";
         if(problem) { NSAlert *a=[NSAlert new]; a.messageText=L(problem); [a runModal]; return; }
+        // Published before the guard starts: its first cycle must not see a stale deadline.
+        self.sessionDeadline=self.sessionDuration>0?[NSDate dateWithTimeIntervalSinceNow:self.sessionDuration]:nil;
     }
     self.busy=YES; self.generation++;
     dispatch_async(self.worker, ^{
@@ -847,7 +969,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
             self.busy=NO;
             if(ok) {
                 if(enable) {
-                    [self beginSessionWithGuard:pid startSec:startSec startUsec:startUsec deadline:self.sessionDuration>0?[NSDate dateWithTimeIntervalSinceNow:self.sessionDuration]:nil];
+                    [self beginSessionWithGuard:pid startSec:startSec startUsec:startUsec deadline:self.sessionDeadline];
                     [self log:@"session_enabled_guard_confirmed"];
                     [self requestNotifyAuth];
                     if(![self sudoersFilePresent]) [self offerAuthInstallGuide];
@@ -856,6 +978,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
                     self.active=NO;
                 }
             } else {
+                if(enable) self.sessionDeadline=nil;
                 [self log:[NSString stringWithFormat:@"toggle_failed enable=%d stop_guard=%d problem=%@",enable?1:0,stopResult,problem?:@"none"]];
                 NSAlert *a=[NSAlert new];
                 a.messageText=L(ToggleAlertTitle(enable,stopResult,problem));

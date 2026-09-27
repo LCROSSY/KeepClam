@@ -16,7 +16,8 @@ A tiny macOS menu-bar app that keeps your MacBook running with the lid closed �
 
 - 🌡️ **Thermal guard** — an independent watchdog samples the official macOS thermal pressure every 5 s. On `serious`/`critical` (or 3 consecutive failed reads) it logs the trigger, restores sleep, and requests immediate sleep.
 - 🛟 **Crash-safe** — the guard outlives the app. If the app quits or crashes mid-session, the guard notices and restores normal sleep. No leaked `SleepDisabled 1`.
-- 🔋 **Auto-stop** — optional timer (30 min / 1 / 2 / 4 h / ∞), battery floor (5–50 %, default 20 %), and Low Power Mode yield.
+- 🔋 **Auto-stop** — optional timer (1 / 2 / 4 h / ∞, or custom 1 min–24 h), battery floor (10 / 20 / 30 %, or custom 5–95 %, default 20 %), Low Power Mode yield, and a stop after 3 consecutive unreadable battery reads. All checks run in the guard, so a stuck menu cannot suspend them; with the lid closed, an auto-stop also requests immediate sleep (restoring the flag alone does not put a closed Mac to sleep).
+- 🖥️ **Screen off when closed** — without an external display, macOS turns the internal panel off on lid close (`Display is turned off` in `pmset -g log`); KeepClam does not touch the display.
 - 👁️ **The menu bar never lies** — state is read back from the kernel every refresh; externally-enabled states are detected and labeled.
 - 📜 **Session logs** — run-length-encoded samples of lid state, network reachability, and thermal state, so you can answer "what happened last night while the lid was closed?"
 - 🌐 **Bilingual UI** — Simplified Chinese / English, switched in-app without relaunch.
@@ -117,7 +118,7 @@ pmset -g | grep SleepDisabled    # expect no "SleepDisabled 1"
 
 **What if the guard itself dies?** The app notices within one refresh cycle, logs `guard_missing`, notifies you, and immediately attempts to restore sleep itself through the same passwordless whitelist — with a follow-up notification if that fails. The guard is a plain user process: the same user could kill it, which is an accepted trade-off for a personal tool (all comparable tools make it).
 
-**Does the timer survive an app crash?** If the app dies, the guard's parent-death check restores sleep within one cycle — a stricter auto-stop than any timer.
+**Does the timer survive an app crash?** Yes. The timer, battery floor and Low Power Mode checks all run in the guard; if the app dies, the guard's parent-death check also restores sleep within one cycle.
 
 ## Development
 
