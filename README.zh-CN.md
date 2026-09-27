@@ -45,7 +45,7 @@ open build/KeepClam.app
 
 ### 下载预览版
 
-从 [v0.1.0 发布页](https://github.com/LCROSSY/KeepClam/releases/tag/v0.1.0) 下载 `KeepClam-0.1.0.zip` 和 `SHA256SUMS`，解压后将 **KeepClam.app** 拖入「应用程序」。将两个下载文件放在同一目录，运行 `shasum -a 256 -c SHA256SUMS` 校验安装包。
+从 [v0.2.0 发布页](https://github.com/LCROSSY/KeepClam/releases/tag/v0.2.0) 下载 `KeepClam-0.2.0.zip` 和 `SHA256SUMS`，解压后将 **KeepClam.app** 拖入「应用程序」。将两个下载文件放在同一目录，运行 `shasum -a 256 -c SHA256SUMS` 校验安装包。
 
 ### Homebrew
 

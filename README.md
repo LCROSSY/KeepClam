@@ -47,7 +47,7 @@ The app is built at `build/KeepClam.app`. You can also move it to `/Applications
 
 ### Download the preview release
 
-Download `KeepClam-0.1.0.zip` and `SHA256SUMS` from [v0.1.0](https://github.com/LCROSSY/KeepClam/releases/tag/v0.1.0). Unzip and move **KeepClam.app** to `/Applications`. With both downloaded files in the same directory, run `shasum -a 256 -c SHA256SUMS` to verify the ZIP.
+Download `KeepClam-0.2.0.zip` and `SHA256SUMS` from [v0.2.0](https://github.com/LCROSSY/KeepClam/releases/tag/v0.2.0). Unzip and move **KeepClam.app** to `/Applications`. With both downloaded files in the same directory, run `shasum -a 256 -c SHA256SUMS` to verify the ZIP.
 
 ### Homebrew
 
