@@ -1,5 +1,5 @@
 name: Build and test
-description: Builds KeepClam.app and runs the LogTests unit tests. KEEPCLAM_VERSION overrides the bundled version (tag builds strip a leading "v").
+description: Builds KeepClam.app and checks app behavior and the installer. KEEPCLAM_VERSION overrides the bundled version (tag builds strip a leading "v").
 runs:
   using: composite
   steps:
@@ -13,3 +13,9 @@ runs:
         clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement \
           Sources/LogTests.m -o build/LogTests
         ./build/LogTests
+
+    - name: Test installer
+      shell: bash
+      run: |
+        bash -n scripts/install.sh
+        LC_ALL=en_US.UTF-8 python3 scripts/test-install.py

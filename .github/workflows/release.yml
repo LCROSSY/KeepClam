@@ -23,19 +23,23 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           /usr/bin/ditto -c -k --norsrc --noextattr --keepParent build/KeepClam.app "KeepClam-${VERSION}.zip"
-          shasum -a 256 "KeepClam-${VERSION}.zip" > SHA256SUMS
+          cp scripts/install.sh install.sh
+          shasum -a 256 "KeepClam-${VERSION}.zip" install.sh > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: KeepClam-*.zip
+          subject-path: |
+            KeepClam-*.zip
+            install.sh
 
       - name: Upload release artifact
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             KeepClam-*.zip
+            install.sh
             SHA256SUMS
           generate_release_notes: true
           prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
