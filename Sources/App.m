@@ -654,8 +654,13 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     self.item.menu=menu;
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
-    NSImage *appIcon=[[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"AppIcon" ofType:@"icns"]];
-    if(appIcon) NSApp.applicationIconImage=appIcon;
+    // Alerts fall back to a placeholder icon when the bundle isn't registered with Launch
+    // Services, so the icon is set explicitly. Only reps up to 256 px are kept: alerts draw
+    // it at 64 pt, and the 1024 px rep would stay decoded in memory (~8 MB) for the whole run.
+    NSImage *full=[[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"AppIcon" ofType:@"icns"]];
+    NSImage *appIcon=[[NSImage alloc] initWithSize:NSMakeSize(128,128)];
+    for(NSImageRep *rep in full.representations) if(rep.pixelsWide<=256) [appIcon addRepresentation:rep];
+    if(appIcon.representations.count) NSApp.applicationIconImage=appIcon;
     // One-time migration of the legacy LidAwake log directory, strictly before this
     // launch creates anything in the new location. An existing new directory wins.
     MigrateLegacyLogs(NSHomeDirectory());
@@ -990,9 +995,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 }
 - (void)logs:(id)sender { [self flush]; [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:self.logPath]]; }
 - (void)help:(id)sender {
-    NSAlert *a=[NSAlert new]; a.messageText=@"KeepClam";
-    NSImage *appIcon=[[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"AppIcon" ofType:@"icns"]];
-    if(appIcon) a.icon=appIcon;
+    NSAlert *a=[NSAlert new]; a.messageText=@"KeepClam"; // icon: applicationIconImage, set at launch
     a.informativeText=L(@"help.body");
     [a addButtonWithTitle:L(@"help.close")];
     [a addButtonWithTitle:L(@"help.github")];
