@@ -1,94 +1,132 @@
-# KeepClam 🦪
+<div align="center">
 
+# 🦪 KeepClam
+
+### Keep calm. Keep the lid closed. Keep running.
+
+A tiny macOS menu-bar app that keeps your MacBook running with the lid closed — on battery, with no external display.<br>
+Built for coding agents that keep working after you close the lid (Claude Code, Codex, …), overnight builds, big downloads and data syncs.
+
+[![Version](https://img.shields.io/github/v/release/LCROSSY/KeepClam?include_prereleases&color=blue&label=version)](https://github.com/LCROSSY/KeepClam/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey.svg)](#installation)
 [![CI](https://github.com/LCROSSY/KeepClam/actions/workflows/ci.yml/badge.svg)](https://github.com/LCROSSY/KeepClam/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/LCROSSY/KeepClam)](LICENSE)
 
-**Keep calm. Keep the lid closed. Keep running.**
+**English** | [简体中文](README.zh-CN.md)
 
-A tiny macOS menu-bar app that keeps your MacBook running with the lid closed — for overnight builds, downloads, syncs, and coding agents (Codex, Claude Code, …) that you want to keep alive after closing the lid. Works on battery, no external display required.
+**[Quick Start](#quick-start) · [Features](#features) · [Comparison](#comparison) · [Installation](#installation) · [FAQ](#faq) · [Uninstall](#uninstall)**
 
-**KeepClam provides active overheat protection**: a watchdog process checks the system thermal state every 5 seconds and, when protection is triggered, attempts to restore normal sleep and requests immediate sleep.
+</div>
 
-[中文文档](README.zh-CN.md)
+## The menu
 
-## Why
+<p align="center"><img src="docs/images/menu-en.png" alt="KeepClam menu during a session: thermal state, time left, and the Settings and Auto-Stop submenus" width="600"></p>
 
-`caffeinate` and assertion-based tools (Caffeine, KeepingYouAwake, Amphetamine) prevent *idle* sleep only — they cannot keep a MacBook awake once the lid is closed. The only user-space mechanism that does is the kernel's `SleepDisabled` flag (`sudo pmset -a disablesleep 1`). KeepClam wraps that flag with the safety net it deserves:
+The menu-bar title shows the current state: `○ KeepClam` when off, `● KeepClam` while running lid-closed.
 
-- 🌡️ **Thermal guard** — an independent watchdog samples the official macOS thermal pressure every 5 s. On `serious`/`critical` (or 3 consecutive failed reads) it logs the trigger, restores sleep, and requests immediate sleep.
-- 🛟 **Crash-safe** — the guard outlives the app. If the app quits or crashes mid-session, the guard notices and restores normal sleep. No leaked `SleepDisabled 1`.
-- 🔋 **Auto-stop** — optional timer (1 / 2 / 4 h / ∞, or custom 1 min–24 h), battery floor (10 / 20 / 30 %, or custom 5–95 %, default 20 %), Low Power Mode yield, and a stop after 3 consecutive unreadable battery reads. All checks run in the guard, so a stuck menu cannot suspend them; with the lid closed, an auto-stop also requests immediate sleep (restoring the flag alone does not put a closed Mac to sleep).
-- 🖥️ **Screen off when closed** — without an external display, macOS turns the internal panel off on lid close (`Display is turned off` in `pmset -g log`); KeepClam does not touch the display.
-- 👁️ **The menu bar never lies** — state is read back from the kernel every refresh; externally-enabled states are detected and labeled.
-- 📜 **Session logs** — run-length-encoded samples of lid state, network reachability, and thermal state, so you can answer "what happened last night while the lid was closed?"
-- 🌐 **Bilingual UI** — Simplified Chinese / English, switched in-app without relaunch.
+## Quick Start
 
-## Install
+1. **Install**: run this in Terminal. No Xcode or Homebrew needed; the script verifies the release, then installs and opens the app.
 
-**Requirements:** macOS 13+ (universal binary; Apple Silicon tested, Intel untested).
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash
+   ```
 
-### Free installer (recommended)
+2. **Install passwordless sudo** (one time): choose **Passwordless sudo: not installed — click to install** in the menu and enter your admin password once. Unattended auto-stops and overheat protection rely on it; see [Passwordless sudo](#passwordless-sudo).
+3. **Turn it on**: choose **Enable Lid-Closed Running**. Once the menu bar shows `● KeepClam`, close the lid and your work keeps running.
 
-No Xcode or Homebrew is needed. Run in Terminal:
+## Why KeepClam?
+
+`caffeinate` and power-assertion apps (such as KeepingYouAwake) only prevent *idle* sleep. Without an external display, closing the lid still puts the Mac to sleep. In user space, the only switch that holds off lid-close sleep is the kernel's `SleepDisabled` flag (`sudo pmset -a disablesleep 1`).
+
+Flipping that switch by hand is risky: nothing watches the temperature, and if a script fails or you forget to turn it off, the Mac stays awake until the battery runs out. KeepClam puts a safety net around that switch.
+
+## Features
+
+- 🌡️ **Overheat protection**: an independent guard process reads macOS's thermal pressure every 5 seconds. At **Serious** or **Critical**, or after 3 failed reads in a row, it logs the event, restores sleep and puts the Mac to sleep immediately.
+- 🛟 **Crash safety**: the guard runs separately from the app. If the app quits or crashes, the guard restores sleep right away; if the guard disappears, the app notices within 5 seconds and restores sleep itself.
+- 🔋 **Auto-stop**: stop after a set time (1 / 2 / 4 hours, or custom 1 minute–24 hours) or at a battery floor (20% by default, adjustable 5%–95%); Low Power Mode or repeated battery read failures also stop it. Battery checks apply only when running on battery. Stopping with the lid closed puts the Mac to sleep immediately.
+- 🔒 **Narrow passwordless sudo**: one sudoers rule that allows exactly two fixed `pmset` commands, so toggling doesn't ask for a password every time.
+- 👁️ **Honest status**: every menu-bar refresh re-reads the real state from the kernel, and clearly labels a state that was turned on by something else.
+- 📜 **Session logs**: records lid and thermal state at your chosen frequency (network reachability is probed at most once a minute) and merges repeated states into one line, so you can see what happened overnight.
+- 🌐 **English and Chinese**: switch in **Settings → Language**; takes effect immediately.
+
+With the lid closed and no external display, macOS turns off the built-in display on its own, so no power is wasted on it.
+
+## Comparison
+
+| | `caffeinate` and power-assertion apps | Manual `pmset disablesleep 1` | **KeepClam** |
+| :--- | :---: | :---: | :---: |
+| Keeps running lid-closed without an external display | ❌ | ✅ | ✅ |
+| Stops automatically when overheating | — | ❌ | ✅ |
+| Restores sleep if the app quits or crashes | — | ❌ manual restore | ✅ |
+| Auto-stops by time or battery level | Some apps | ❌ | ✅ |
+| Puts a closed Mac to sleep when stopping | — | ❌ | ✅ |
+| No password prompt on every toggle | No root needed | ❌ `sudo` each time | ✅ narrow sudoers rule |
+
+## Installation
+
+**Requirements:** macOS 13 or later. Universal binary, tested on Apple Silicon; the Intel slice is included but untested on real hardware.
+
+Current releases are ad-hoc signed and **not notarized by Apple**.
+
+### Option 1: One command (recommended)
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash
 ```
 
-This runs the script directly and leaves no file behind. It downloads a complete release, including preview releases, and verifies the ZIP and app integrity. If the GitHub API is rate-limited, it falls back to the release feed. It then shows the version, source and installation path; press Enter (or `y`) to install, or anything else to cancel. Files downloaded this way carry no quarantine attribute, so there is no separate trust choice. Add `--yes` to confirm without a prompt when no terminal is available.
+- Picks the newest release (including previews) and verifies the SHA-256 checksum, archive contents, app identity and code signature. If any check fails, the installed app is left untouched.
+- Shows the version, source and install location, then asks you to press Enter. Installs to `/Applications`, or `~/Applications` if that isn't writable.
+- Apps installed this way carry no quarantine attribute, so macOS won't block the first launch.
+- To update: stop the session and quit the app from the menu, then run the same command.
 
-The default location is `/Applications`, falling back to `~/Applications` if it is not writable. The installer opens the menu-bar app when finished. Run the installer again to update, after stopping the lid-closed session and quitting the old app. If KeepClam was installed with Homebrew, the installer stops and asks you to run `brew upgrade --cask keepclam` instead.
-
-The output language follows your system language; add `--language zh` or `--language en` to override it. To select a version, use a personal applications directory, or defer launching, pass options after `bash -s --`:
-
-```sh
-curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash -s -- --version 0.2.1 --app-dir "$HOME/Applications" --no-open
-```
-
-Current releases are ad-hoc signed and have not been notarized by Apple. Choosing to install and trust the app expresses your own trust; checksum verification detects damaged downloads and does not provide Apple notarization. Before unattended lid-closed use, configure passwordless authorization from the app menu separately.
-
-### Install downloaded files (offline)
-
-New releases include `install.sh`. For earlier releases, download [scripts/install.sh](scripts/install.sh) from this repository. Place the script, `KeepClam-<version>.zip` and `SHA256SUMS` in the same directory and run there:
-
-```sh
-shasum -a 256 -c --ignore-missing SHA256SUMS && bash install.sh --local .
-```
-
-ZIP files downloaded in a browser carry a quarantine attribute, so offline installation asks you to choose how to trust it: enter **1** to install and trust KeepClam (removing only this app's quarantine attribute, so it can usually open directly), enter **2** to install without removing quarantine, or press Enter to cancel. Without a terminal, pass `--trust` or `--keep-quarantine`. Use `--version` if the directory contains multiple releases. Run `bash install.sh --help` for all options.
-
-### Homebrew
+### Option 2: Homebrew
 
 ```sh
 brew install --cask LCROSSY/tap/keepclam
 ```
 
-To update later, run `brew update` followed by `brew upgrade --cask keepclam`.
+To update: `brew update && brew upgrade --cask keepclam`. macOS may block the first launch of a Homebrew install; see the [FAQ](#faq).
 
-### First launch
+<details>
+<summary><b>Installer options</b></summary>
 
-If macOS blocks a Homebrew or manually extracted installation, first verify that you trust its source. After attempting to open it, go to **System Settings → Privacy & Security → Open Anyway**, then confirm the prompt. See [Apple's instructions](https://support.apple.com/en-us/102445).
-
-Alternatively, remove only the installed KeepClam app's quarantine attribute in Terminal:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/KeepClam.app"
-```
-
-For a personal installation, use `"$HOME/Applications/KeepClam.app"` instead. This does not notarize the app.
-
-### Manual installation
-
-Download `KeepClam-<version>.zip` and `SHA256SUMS` from [Releases](https://github.com/LCROSSY/KeepClam/releases). Place them in the same directory, run `shasum -a 256 -c --ignore-missing SHA256SUMS` (newer releases also list `install.sh` there), then unzip and move **KeepClam.app** to `/Applications`.
-
-### Build from source
-
-Install Xcode Command Line Tools first (skip if Xcode is already installed):
+Add options after `bash -s --`, for example to pick a version, install to your personal Applications folder and skip launching:
 
 ```sh
-xcode-select --install
+curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash -s -- --version 0.2.1 --app-dir "$HOME/Applications" --no-open
 ```
 
-Once installed, run:
+- `--yes`: confirm without asking (for non-interactive use).
+- `--language zh|en`: output language; follows your system by default.
+- All options: `bash install.sh --help`.
+
+The script stops and explains why if KeepClam is running or was installed with Homebrew.
+</details>
+
+<details>
+<summary><b>Offline install (downloaded release files)</b></summary>
+
+Download `install.sh`, `KeepClam-<version>.zip` and `SHA256SUMS` from [Releases](https://github.com/LCROSSY/KeepClam/releases) into one folder and run there:
+
+```sh
+shasum -a 256 -c SHA256SUMS && bash install.sh --local .
+```
+
+Browser downloads carry a quarantine attribute, so the script asks you to choose: enter **1** to install and trust KeepClam (removes only this app's quarantine attribute), **2** to install only, or press Enter to cancel.
+</details>
+
+<details>
+<summary><b>Manual install</b></summary>
+
+Download `KeepClam-<version>.zip` and `SHA256SUMS`, verify with `shasum -a 256 -c --ignore-missing SHA256SUMS`, then double-click the ZIP in Finder and drag **KeepClam.app** to Applications. If the first launch is blocked, see the [FAQ](#faq).
+</details>
+
+<details>
+<summary><b>Build from source</b></summary>
+
+Requires Xcode Command Line Tools (run `xcode-select --install` if you don't have them):
 
 ```sh
 git clone https://github.com/LCROSSY/KeepClam.git
@@ -96,67 +134,84 @@ cd KeepClam
 zsh scripts/build-native.command
 open build/KeepClam.app
 ```
+</details>
 
-The app is built at `build/KeepClam.app`. You can also move it to `/Applications`.
+## Passwordless sudo
 
-## Passwordless authorization (sudoers whitelist)
+Toggling `SleepDisabled` needs admin rights. KeepClam offers a one-time sudoers rule that allows only these two commands, with no wildcards:
 
-Toggling the `SleepDisabled` flag needs root. Instead of prompting for an admin password on every toggle, KeepClam uses a one-time, narrowly-scoped sudoers rule. Click **免密授权 / Authorize once** in the menu, or run:
+```text
+<your-username> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1
+```
+
+- **Install**: choose **Passwordless sudo: not installed — click to install** in the menu, or run `zsh scripts/install-sudoers.sh` in the repository.
+- **Inspect**: `sudo cat /etc/sudoers.d/keepclam`
+- **Remove**: `sudo rm -f /etc/sudoers.d/keepclam` (or `zsh scripts/uninstall-sudoers.sh` in the repository).
+
+KeepClam works without it, but asks for your password on every toggle. **Install it before leaving the Mac unattended**: the guard and auto-stop use the passwordless path (`sudo -n`), and nobody is there to type a password.
+
+## Launch at Login
+
+Turn on **Settings → Launch at Login** (off by default). It only starts the menu-bar app at login; it never enables lid-closed running or resumes a previous session. If macOS requires approval, the menu opens the Login Items settings.
+
+## Safety and emergency restore
+
+- **Use at your own risk.** `disablesleep` is a global power setting that macOS doesn't expose in System Settings; re-test after major macOS upgrades.
+- **Don't put a running closed MacBook in a bag** or anywhere without airflow. The thermal guard reads macOS's thermal pressure levels, not Celsius; it is a best-effort safety net, not a substitute for ventilation.
+- If anything goes wrong, this restores the default sleep behavior immediately:
 
 ```sh
-zsh scripts/install-sudoers.sh
+sudo pmset -a disablesleep 0     # restore default sleep
+pmset -g | grep SleepDisabled    # verify: "SleepDisabled 1" should be gone
 ```
-
-The rule allows exactly two commands and nothing else — no wildcards:
-
-```
-<you> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1
-```
-
-- Audit what's installed: `sudo cat /etc/sudoers.d/keepclam`
-- Remove it: `zsh scripts/uninstall-sudoers.sh` (toggles go back to per-action admin prompts)
-
-Without the rule installed, KeepClam still works — it falls back to an admin password prompt per toggle.
-
-Install the rule before closing the lid for unattended use: the background guard and automatic-stop paths use `sudo -n` and cannot display a password prompt while you are away.
-
-## Launch at login
-
-Enable **Settings → Launch at Login** after installing the app in `/Applications`. This starts only the menu-bar app; it does not enable lid-closed running or resume a previous session. The option is off until you enable it. If approval is required, the menu opens the system Login Items settings. Disable the option before uninstalling.
-
-Before replacing an existing copy, stop the session and quit the running app.
-
-## Usage
-
-1. Launch KeepClam — a status indicator appears in the menu bar (`○ KeepClam` off, `● KeepClam` on).
-2. Click **开启合盖运行** (keep running with lid closed). On first use, install the sudoers whitelist as above.
-3. Optional: pick an auto-stop timer, a battery floor, and your language under **Settings**.
-4. Close the lid. Your tasks keep running.
-5. The thermal guard runs during the session and outlives the app if it quits; logs live in `~/Library/Logs/KeepClam/`.
-
-Key events (thermal trigger, timer/battery/Low-Power-Mode auto-stop) are delivered as system notifications so you see them after reopening the lid.
-
-## Emergency restore
-
-If anything ever goes wrong, one command restores factory sleep behavior:
-
-```sh
-sudo pmset -a disablesleep 0     # then verify:
-pmset -g | grep SleepDisabled    # expect no "SleepDisabled 1"
-```
-
-## Safety
-
-- Use at your own risk. `disablesleep` is a global power setting macOS does not expose in System Settings; re-test after major macOS upgrades.
-- The thermal guard is software best-effort — it reads Apple's official thermal-pressure levels, not Celsius. Do not put a running closed MacBook in a bag; keep it ventilated.
 
 ## FAQ
 
-**Why not Celsius temperatures?** Apple Silicon exposes no stable, unified CPU temperature API to unprivileged apps. KeepClam uses `NSProcessInfo.thermalState` (nominal/fair/serious/critical) — the same signal macOS itself throttles on.
+<details>
+<summary><b>macOS blocks the first launch. What should I do?</b></summary>
 
-**What if the guard itself dies?** The app notices within one refresh cycle, logs `guard_missing`, notifies you, and immediately attempts to restore sleep itself through the same passwordless whitelist — with a follow-up notification if that fails. The guard is a plain user process: the same user could kill it, which is an accepted trade-off for a personal tool (all comparable tools make it).
+Installs from the one-line command aren't affected. Homebrew and manual installs carry a quarantine attribute, and KeepClam isn't notarized, so macOS may block it. If you trust the source, try opening it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. See [Apple's instructions](https://support.apple.com/en-us/102445).
 
-**Does the timer survive an app crash?** Yes. The timer, battery floor and Low Power Mode checks all run in the guard; if the app dies, the guard's parent-death check also restores sleep within one cycle.
+Or remove only KeepClam's quarantine attribute in Terminal (use `"$HOME/Applications/KeepClam.app"` for a personal install):
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/KeepClam.app"
+```
+</details>
+
+<details>
+<summary><b>Why thermal levels instead of Celsius?</b></summary>
+
+Apple Silicon offers no stable, unified CPU temperature API to unprivileged apps. KeepClam reads `NSProcessInfo.thermalState` (Nominal / Fair / Serious / Critical), the same signal macOS uses to decide when to throttle.
+</details>
+
+<details>
+<summary><b>What if the guard process dies?</b></summary>
+
+The app notices within 5 seconds: it logs `guard_missing`, sends a notification and restores sleep itself; if that fails, it tells you to run the emergency command. The guard is an ordinary user process, so other programs running as you can kill it — a trade-off accepted for a personal tool.
+</details>
+
+<details>
+<summary><b>If the app crashes, does auto-stop still work?</b></summary>
+
+Yes. The timer, battery floor and Low Power Mode checks all run in the guard. When the app quits or crashes, the guard restores sleep within one check cycle — sooner than any timer would.
+</details>
+
+<details>
+<summary><b>How do I see what happened while the lid was closed?</b></summary>
+
+Logs are in `~/Library/Logs/KeepClam/`; open them from **Settings → View Logs**. Key events such as overheating, timer stops and low battery also send notifications you'll see when you open the lid.
+</details>
+
+## Uninstall
+
+1. Choose **Disable Lid-Closed Running** in the menu and turn off **Settings → Launch at Login**.
+2. Remove passwordless sudo: `sudo rm -f /etc/sudoers.d/keepclam`.
+3. Choose **Quit and Restore Sleep**.
+4. Delete the app: `brew uninstall --cask keepclam` for Homebrew installs; otherwise move **KeepClam.app** to the Trash.
+5. (Optional) Delete logs in `~/Library/Logs/KeepClam/` and settings with `defaults delete io.github.LCROSSY.keepclam`.
+
+Finally, run `pmset -g | grep SleepDisabled` and make sure `SleepDisabled 1` is not shown.
 
 ## Development
 
@@ -167,7 +222,7 @@ clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications 
 python3 scripts/test-install.py          # check installation and updates in temporary directories
 ```
 
-Single-file Objective-C/AppKit, no Xcode project, no dependencies. CI builds and checks both app behavior and the installer on every push; releases include the installer and SHA-256 checksums for the ZIP and script.
+Single-file Objective-C/AppKit, no Xcode project, no dependencies. See [Architecture](docs/architecture.md) for how the guard and brake path work.
 
 ## License
 
