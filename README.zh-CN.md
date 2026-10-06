@@ -24,7 +24,61 @@ KeepClam 是一个小巧的 macOS 菜单栏应用：合上笔记本盖子，MacB
 
 **系统要求**：macOS 13 及以上。安装包是通用二进制（Apple Silicon 上实测过；Intel 版随包附带，但没在真机上测过）。
 
-### 从源码构建（当前可用）
+### 免费安装脚本（推荐）
+
+不需要 Xcode 或 Homebrew。在「终端」中运行：
+
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash
+```
+
+脚本直接运行，不会留下文件。它会下载安装文件齐全的发布版（包含预览版），校验安装包和应用完整性；GitHub API 达到频率限制时会改用发布订阅源。然后显示版本、来源、安装位置，按回车（或输入 `y`）安装，输入其他内容取消。通过脚本下载的文件没有下载隔离标记，因此不需要单独选择信任方式。没有终端的非交互环境可添加 `--yes` 直接确认。
+
+默认安装到「应用程序」；如果该目录不可写，会使用 `~/Applications`。安装完成后打开菜单栏应用。更新时也可以再次运行脚本，但必须先结束合盖运行并退出旧应用；如果 KeepClam 是通过 Homebrew 安装的，脚本会停止并提示你运行 `brew upgrade --cask keepclam` 更新。
+
+输出语言跟随系统语言，可用 `--language zh` 或 `--language en` 指定。需要指定版本、使用个人应用目录或安装后暂不打开时，在 `bash -s --` 之后添加选项：
+
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash -s -- --version 0.2.0 --app-dir "$HOME/Applications" --no-open
+```
+
+当前发布版使用临时签名，未经过 Apple 公证。「安装并信任」是你主动信任这个应用；安装包校验用于发现下载损坏，不等于 Apple 公证。安装脚本不会自动配置合盖运行所需的免密授权，合盖无人值守前仍需在应用菜单中授权。
+
+### 已下载安装包（离线安装）
+
+新发布版会附带 `install.sh`；已有发布版没有该文件时，可从仓库下载 [scripts/install.sh](scripts/install.sh)。将脚本、`KeepClam-<版本号>.zip` 和 `SHA256SUMS` 放在同一目录，在该目录运行：
+
+```sh
+shasum -a 256 -c --ignore-missing SHA256SUMS && bash install.sh --local .
+```
+
+浏览器下载的 ZIP 带有下载隔离标记，所以离线安装会询问信任方式：输入 **1** 安装并信任 KeepClam（仅移除这个应用的下载隔离标记，通常可以直接打开），输入 **2** 仅安装、不移除下载隔离标记，直接回车取消。没有终端时请添加 `--trust` 或 `--keep-quarantine`。目录中有多个版本时，用 `--version` 指定要安装的版本。查看全部选项：`bash install.sh --help`；输出语言可用 `--language zh|en` 指定。
+
+### Homebrew
+
+```sh
+brew install --cask LCROSSY/tap/keepclam
+```
+
+后续更新：先运行 `brew update`，再运行 `brew upgrade --cask keepclam`。
+
+### 首次打开
+
+通过 Homebrew 或手动解压安装后，如果 macOS 阻止打开，确认应用来源可信后，先尝试打开一次，再前往「系统设置 → 隐私与安全性 → 仍要打开」，按提示确认。具体步骤参见 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。
+
+也可以用终端仅移除已安装 KeepClam 的下载隔离标记：
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/KeepClam.app"
+```
+
+如果安装在个人应用目录，请将路径改为 `"$HOME/Applications/KeepClam.app"`。此操作不代表应用经过 Apple 公证。
+
+### 手动安装
+
+从 [发布页](https://github.com/LCROSSY/KeepClam/releases) 下载 `KeepClam-<版本号>.zip` 和 `SHA256SUMS`。将它们放在同一目录，运行 `shasum -a 256 -c --ignore-missing SHA256SUMS` 校验（新发布版的清单中还列有 `install.sh`）后，解压并将 **KeepClam.app** 拖入「应用程序」。
+
+### 从源码构建
 
 需要先安装 Xcode Command Line Tools（已安装 Xcode 的用户可跳过）：
 
@@ -42,22 +96,6 @@ open build/KeepClam.app
 ```
 
 构建产物位于 `build/KeepClam.app`，也可以将它拖进「应用程序」文件夹。
-
-### 下载预览版
-
-从 [v0.2.0 发布页](https://github.com/LCROSSY/KeepClam/releases/tag/v0.2.0) 下载 `KeepClam-0.2.0.zip` 和 `SHA256SUMS`，解压后将 **KeepClam.app** 拖入「应用程序」。将两个下载文件放在同一目录，运行 `shasum -a 256 -c SHA256SUMS` 校验安装包。
-
-### Homebrew
-
-```sh
-brew install --cask LCROSSY/tap/keepclam
-```
-
-后续更新：先运行 `brew update`，再运行 `brew upgrade --cask keepclam`。
-
-### 首次打开
-
-当前构建使用临时签名（ad-hoc），未经过 Apple 公证。如果 macOS 阻止打开，确认应用来源可信后，先尝试打开一次，再前往「系统设置 → 隐私与安全性 → 仍要打开」，按提示确认。具体步骤参见 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。
 
 ## 免密授权（sudoers 白名单）
 
@@ -124,9 +162,10 @@ pmset -g | grep SleepDisabled    # 不应再出现 "SleepDisabled 1"
 zsh scripts/build-native.command        # 构建应用
 clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement \
       Sources/LogTests.m -o build/LogTests && ./build/LogTests   # 运行测试
+python3 scripts/test-install.py          # 在临时目录中验证安装与更新
 ```
 
-整个应用就一个 Objective-C/AppKit 源文件，没有 Xcode 工程，零依赖。CI 每次 push 都会构建并跑测试；Release 附 SHA-256 校验和。
+整个应用就一个 Objective-C/AppKit 源文件，没有 Xcode 工程，零依赖。CI 每次 push 都会构建并验证应用和安装流程；Release 附安装脚本及 ZIP、脚本的 SHA-256 校验和。
 
 ## 许可
 

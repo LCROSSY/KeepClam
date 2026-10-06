@@ -24,9 +24,63 @@ A tiny macOS menu-bar app that keeps your MacBook running with the lid closed �
 
 ## Install
 
-**Requirements:** macOS 13+ (universal binary; Apple Silicon tested, Intel untested). Xcode Command Line Tools for building from source.
+**Requirements:** macOS 13+ (universal binary; Apple Silicon tested, Intel untested).
 
-### Build from source (available now)
+### Free installer (recommended)
+
+No Xcode or Homebrew is needed. Run in Terminal:
+
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash
+```
+
+This runs the script directly and leaves no file behind. It downloads a complete release, including preview releases, and verifies the ZIP and app integrity. If the GitHub API is rate-limited, it falls back to the release feed. It then shows the version, source and installation path; press Enter (or `y`) to install, or anything else to cancel. Files downloaded this way carry no quarantine attribute, so there is no separate trust choice. Add `--yes` to confirm without a prompt when no terminal is available.
+
+The default location is `/Applications`, falling back to `~/Applications` if it is not writable. The installer opens the menu-bar app when finished. Run the installer again to update, after stopping the lid-closed session and quitting the old app. If KeepClam was installed with Homebrew, the installer stops and asks you to run `brew upgrade --cask keepclam` instead.
+
+The output language follows your system language; add `--language zh` or `--language en` to override it. To select a version, use a personal applications directory, or defer launching, pass options after `bash -s --`:
+
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash -s -- --version 0.2.0 --app-dir "$HOME/Applications" --no-open
+```
+
+Current releases are ad-hoc signed and have not been notarized by Apple. Choosing to install and trust the app expresses your own trust; checksum verification detects damaged downloads and does not provide Apple notarization. Before unattended lid-closed use, configure passwordless authorization from the app menu separately.
+
+### Install downloaded files (offline)
+
+New releases include `install.sh`. For earlier releases, download [scripts/install.sh](scripts/install.sh) from this repository. Place the script, `KeepClam-<version>.zip` and `SHA256SUMS` in the same directory and run there:
+
+```sh
+shasum -a 256 -c --ignore-missing SHA256SUMS && bash install.sh --local .
+```
+
+ZIP files downloaded in a browser carry a quarantine attribute, so offline installation asks you to choose how to trust it: enter **1** to install and trust KeepClam (removing only this app's quarantine attribute, so it can usually open directly), enter **2** to install without removing quarantine, or press Enter to cancel. Without a terminal, pass `--trust` or `--keep-quarantine`. Use `--version` if the directory contains multiple releases. Run `bash install.sh --help` for all options.
+
+### Homebrew
+
+```sh
+brew install --cask LCROSSY/tap/keepclam
+```
+
+To update later, run `brew update` followed by `brew upgrade --cask keepclam`.
+
+### First launch
+
+If macOS blocks a Homebrew or manually extracted installation, first verify that you trust its source. After attempting to open it, go to **System Settings → Privacy & Security → Open Anyway**, then confirm the prompt. See [Apple's instructions](https://support.apple.com/en-us/102445).
+
+Alternatively, remove only the installed KeepClam app's quarantine attribute in Terminal:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/KeepClam.app"
+```
+
+For a personal installation, use `"$HOME/Applications/KeepClam.app"` instead. This does not notarize the app.
+
+### Manual installation
+
+Download `KeepClam-<version>.zip` and `SHA256SUMS` from [Releases](https://github.com/LCROSSY/KeepClam/releases). Place them in the same directory, run `shasum -a 256 -c --ignore-missing SHA256SUMS` (newer releases also list `install.sh` there), then unzip and move **KeepClam.app** to `/Applications`.
+
+### Build from source
 
 Install Xcode Command Line Tools first (skip if Xcode is already installed):
 
@@ -44,22 +98,6 @@ open build/KeepClam.app
 ```
 
 The app is built at `build/KeepClam.app`. You can also move it to `/Applications`.
-
-### Download the preview release
-
-Download `KeepClam-0.2.0.zip` and `SHA256SUMS` from [v0.2.0](https://github.com/LCROSSY/KeepClam/releases/tag/v0.2.0). Unzip and move **KeepClam.app** to `/Applications`. With both downloaded files in the same directory, run `shasum -a 256 -c SHA256SUMS` to verify the ZIP.
-
-### Homebrew
-
-```sh
-brew install --cask LCROSSY/tap/keepclam
-```
-
-To update later, run `brew update` followed by `brew upgrade --cask keepclam`.
-
-### First launch
-
-The current build is ad-hoc signed and has not been notarized by Apple. If macOS blocks it, first verify that you trust its source. After attempting to open it, go to **System Settings → Privacy & Security → Open Anyway**, then confirm the prompt. See [Apple's instructions](https://support.apple.com/en-us/102445).
 
 ## Passwordless authorization (sudoers whitelist)
 
@@ -126,9 +164,10 @@ pmset -g | grep SleepDisabled    # expect no "SleepDisabled 1"
 zsh scripts/build-native.command        # build the app
 clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement \
       Sources/LogTests.m -o build/LogTests && ./build/LogTests   # run tests
+python3 scripts/test-install.py          # check installation and updates in temporary directories
 ```
 
-Single-file Objective-C/AppKit, no Xcode project, no dependencies. CI builds and tests on every push; releases are tagged with SHA-256 checksums.
+Single-file Objective-C/AppKit, no Xcode project, no dependencies. CI builds and checks both app behavior and the installer on every push; releases include the installer and SHA-256 checksums for the ZIP and script.
 
 ## License
 
