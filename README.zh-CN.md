@@ -77,9 +77,9 @@ curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/insta
 ```
 
 - 自动选择最新发布版（包含预览版），校验 SHA-256、压缩包内容、应用身份和代码签名，任一项不通过都不会替换已安装的应用。
-- 显示版本、来源和安装位置后，按回车确认。默认装到「应用程序」，不可写时改用 `~/Applications`。
+- 显示版本、来源和安装位置后，按回车确认。默认装到「应用程序」，不可写时改用 `~/Applications`；已经装过的，装回原来的位置，不会装出两份。
 - 用这种方式安装的应用不带下载隔离标记，首次打开不会被 macOS 拦截。
-- 更新：先在菜单中结束合盖运行并退出应用，再运行同一条命令。
+- 更新：再运行同一条命令即可。应用开着时会先自动退出，装完重新打开；合盖运行正在进行时脚本会停下来，请先在菜单中关闭合盖运行。
 
 ### 方式二：Homebrew
 
@@ -102,7 +102,7 @@ curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/insta
 - `--language zh|en`：指定输出语言，默认跟随系统。
 - 全部选项：`bash install.sh --help`。
 
-如果 KeepClam 正在运行，或者是通过 Homebrew 安装的，脚本会停止并说明原因。
+合盖运行正在进行、旧版 LidAwake 正在运行，或者 KeepClam 是通过 Homebrew 安装的，脚本会停止并说明原因。
 </details>
 
 <details>
