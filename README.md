@@ -41,7 +41,7 @@ The default location is `/Applications`, falling back to `~/Applications` if it 
 The output language follows your system language; add `--language zh` or `--language en` to override it. To select a version, use a personal applications directory, or defer launching, pass options after `bash -s --`:
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash -s -- --version 0.2.0 --app-dir "$HOME/Applications" --no-open
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash -s -- --version 0.2.1 --app-dir "$HOME/Applications" --no-open
 ```
 
 Current releases are ad-hoc signed and have not been notarized by Apple. Choosing to install and trust the app expresses your own trust; checksum verification detects damaged downloads and does not provide Apple notarization. Before unattended lid-closed use, configure passwordless authorization from the app menu separately.

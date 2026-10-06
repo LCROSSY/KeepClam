@@ -39,7 +39,7 @@ curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent
 输出语言跟随系统语言，可用 `--language zh` 或 `--language en` 指定。需要指定版本、使用个人应用目录或安装后暂不打开时，在 `bash -s --` 之后添加选项：
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash -s -- --version 0.2.0 --app-dir "$HOME/Applications" --no-open
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash -s -- --version 0.2.1 --app-dir "$HOME/Applications" --no-open
 ```
 
 当前发布版使用临时签名，未经过 Apple 公证。「安装并信任」是你主动信任这个应用；安装包校验用于发现下载损坏，不等于 Apple 公证。安装脚本不会自动配置合盖运行所需的免密授权，合盖无人值守前仍需在应用菜单中授权。
