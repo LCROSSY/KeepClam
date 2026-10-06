@@ -8,6 +8,8 @@ INSTALL_TMP=""
 INSTALL_STAGE=""
 INSTALL_DEST=""
 INSTALL_COMMITTED=0
+INSTALL_APP_RUNNING=0
+INSTALL_APP_QUIT=0
 INSTALL_LANGUAGE="zh"
 
 say() {
@@ -59,8 +61,10 @@ KeepClam 免费安装 / Free installation
 
 在线安装会显示版本与来源，按回车或输入 y 确认；非交互运行请加 --yes。
 --local 使用已下载的文件，会询问信任方式；非交互运行必须明确选择 --trust 或 --keep-quarantine。
+默认装回已有 KeepClam 所在的目录；应用正在运行（未开启合盖运行）时会先退出，装完重新打开。
 Online installs show the version and source, then ask you to confirm (Enter or y); add --yes when non-interactive.
 --local asks how to trust a downloaded ZIP; non-interactive runs require --trust or --keep-quarantine.
+Updates go to the existing install location. A running app (with no lid-closed session) is quit first and reopened afterwards.
 EOF
 }
 
@@ -72,6 +76,9 @@ cleanup() {
       if [ ! -e "$INSTALL_DEST" ] && [ ! -L "$INSTALL_DEST" ] &&
           /bin/mv "$INSTALL_STAGE/previous.app" "$INSTALL_DEST"; then
         say "安装未完成，已恢复原来的应用。" "Installation did not finish; the previous app was restored." >&2
+        if [ "$INSTALL_APP_QUIT" -eq 1 ]; then
+          say "安装前退出的 KeepClam 需要你手动重新打开。" "KeepClam was quit before installing; reopen it manually." >&2
+        fi
       else
         say "原来的应用保留在：${INSTALL_STAGE}/previous.app" "The previous app is preserved at: ${INSTALL_STAGE}/previous.app" >&2
         INSTALL_STAGE=""
@@ -164,14 +171,103 @@ homebrew_cask_installed() {
   return 1
 }
 
-require_stopped() {
+legacy_running() {
   local status=0
-  /usr/bin/pgrep -x 'KeepClam|LidAwake' >/dev/null 2>&1 || status=$?
-  if [ "$status" -eq 0 ]; then
-    fail "请先在菜单栏结束合盖运行并退出 KeepClam / LidAwake，再重新安装。" \
-      "Stop the lid-closed session and quit KeepClam / LidAwake before installing."
-  elif [ "$status" -ne 1 ]; then
-    fail "无法确认应用是否正在运行，已取消安装。" "Could not check for running apps; installation cancelled."
+  /usr/bin/pgrep -x LidAwake >/dev/null 2>&1 || status=$?
+  [ "$status" -le 1 ] || return 2
+  return "$status"
+}
+
+# 每行输出一个 KeepClam 进程：「PID UID 命令行」。无法枚举进程时返回非零。
+keepclam_processes() {
+  local pids pid status=0
+  pids=$(/usr/bin/pgrep -x KeepClam 2>/dev/null) || status=$?
+  [ "$status" -le 1 ] || return 1
+  for pid in $pids; do
+    /bin/ps -ww -o pid=,uid=,args= -p "$pid" 2>/dev/null || true
+  done
+}
+
+# 输出 none / app / session / other_user / legacy。守护进程与应用是同一个可执行文件，
+# 以 --guard 参数运行；它在运行就说明合盖运行会话正在进行。
+running_state() {
+  local status=0 list pid uid args state=none
+  legacy_running || status=$?
+  [ "$status" -ne 2 ] || return 1
+  if [ "$status" -eq 0 ]; then printf 'legacy\n'; return 0; fi
+  list=$(keepclam_processes) || return 1
+  while read -r pid uid args; do
+    [ -n "$pid" ] || continue
+    case " ${args} " in *" --guard "*|*" --stop "*) printf 'session\n'; return 0 ;; esac
+    if [ "$uid" != "$(/usr/bin/id -u)" ]; then state=other_user; elif [ "$state" = none ]; then state=app; fi
+  done <<< "$list"
+  printf '%s\n' "$state"
+}
+
+# 合盖运行会话、旧版 LidAwake 或其他用户的 KeepClam 在运行时拒绝安装；
+# 只有当前用户的菜单栏应用在运行时，记下来，替换前再自动退出。
+require_stopped() {
+  local state
+  state=$(running_state) || fail "无法确认应用是否正在运行，已取消安装。" "Could not check for running apps; installation cancelled."
+  INSTALL_APP_RUNNING=0
+  case "$state" in
+    none) ;;
+    app) INSTALL_APP_RUNNING=1 ;;
+    session) fail "合盖运行正在进行中。请先在菜单中关闭合盖运行，再重新安装。" \
+      "A lid-closed session is running. Turn it off from the menu, then run the installer again." ;;
+    legacy) fail "请先退出旧版 LidAwake，再安装 KeepClam。" "Quit the legacy LidAwake app before installing KeepClam." ;;
+    *) fail "其他用户正在运行 KeepClam，请等对方退出后再安装。" "Another user is running KeepClam; install after they quit it." ;;
+  esac
+}
+
+# 没有合盖运行会话时，应用不持有需要恢复的系统状态，直接结束即可。
+# 不用 AppleScript 退出，避免触发「自动化」权限弹窗。
+quit_running_app() {
+  local list pid uid args i
+  say "正在退出运行中的 KeepClam…" "Quitting the running KeepClam…"
+  list=$(keepclam_processes) || fail "无法确认应用是否正在运行，已取消安装。" "Could not check for running apps; installation cancelled."
+  while read -r pid uid args; do
+    [ -n "$pid" ] || continue
+    case " ${args} " in *" --guard "*|*" --stop "*)
+      fail "合盖运行正在进行中。请先在菜单中关闭合盖运行，再重新安装。" \
+        "A lid-closed session is running. Turn it off from the menu, then run the installer again." ;;
+    esac
+    /bin/kill -TERM "$pid" 2>/dev/null || true
+  done <<< "$list"
+  INSTALL_APP_QUIT=1
+  for ((i = 0; i < 50; i++)); do
+    list=$(keepclam_processes) || fail "无法确认应用是否正在运行，已取消安装。" "Could not check for running apps; installation cancelled."
+    [ -n "$list" ] || return 0
+    /bin/sleep 0.1
+  done
+  fail "KeepClam 未能退出，请手动退出后重新安装。" "KeepClam did not quit; quit it manually and run the installer again."
+}
+
+# 标准应用目录：系统「应用程序」和个人应用目录。
+standard_app_dirs() {
+  printf '%s\n' /Applications "${HOME}/Applications"
+}
+
+is_keepclam_app() {
+  [ -d "$1" ] && [ "$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$1/Contents/Info.plist" 2>/dev/null)" = "$BUNDLE_ID" ]
+}
+
+# 未指定 --app-dir 时沿用已安装的位置，避免装出两份；没有安装过时，优先系统目录。
+default_app_dir() {
+  local system personal
+  { IFS= read -r system; IFS= read -r personal; } < <(standard_app_dirs)
+  if is_keepclam_app "${system}/KeepClam.app"; then
+    [ -w "$system" ] || fail "KeepClam 已安装在 ${system}，但当前用户没有写入权限。请用管理员账户更新，或用 --app-dir 指定目录。" \
+      "KeepClam is installed in ${system}, but you can't write there. Update from an admin account, or choose a directory with --app-dir."
+    if is_keepclam_app "${personal}/KeepClam.app"; then
+      say "注意：${personal} 中还有一份 KeepClam，本次更新 ${system} 中的那份，建议删除多余的一份。" \
+        "Note: another copy of KeepClam is in ${personal}. Updating the one in ${system}; consider removing the extra copy." >&2
+    fi
+    printf '%s\n' "$system"
+  elif is_keepclam_app "${personal}/KeepClam.app" || [ ! -w "$system" ]; then
+    printf '%s\n' "$personal"
+  else
+    printf '%s\n' "$system"
   fi
 }
 
@@ -238,7 +334,7 @@ main() {
   [ "${system_version%%.*}" -ge 13 ] || fail "KeepClam 需要 macOS 13 或更高版本。" "KeepClam requires macOS 13 or later."
 
   if [ -z "$app_dir" ]; then
-    if [ -w /Applications ]; then app_dir="/Applications"; else app_dir="$HOME/Applications"; fi
+    app_dir=$(default_app_dir)
   fi
   [[ "$app_dir" = /* ]] || fail "安装目录必须是绝对路径。" "The applications directory must be an absolute path."
   app_dir="${app_dir%/}"
@@ -312,6 +408,13 @@ main() {
   say "安装来源：https://github.com/${REPOSITORY}/releases/tag/v${version}" "Release source: https://github.com/${REPOSITORY}/releases/tag/v${version}"
   say "安装位置：${INSTALL_DEST}" "Install location: ${INSTALL_DEST}"
   say "此版本使用临时签名，未经过 Apple 公证。" "This release is ad-hoc signed and has not been notarized by Apple."
+  if [ "$INSTALL_APP_RUNNING" -eq 1 ]; then
+    if [ "$launch" -eq 1 ]; then
+      say "KeepClam 正在运行：确认后会先退出它，安装完成后重新打开。" "KeepClam is running: it will be quit before installing and reopened afterwards."
+    else
+      say "KeepClam 正在运行：确认后会先退出它。" "KeepClam is running: it will be quit before installing."
+    fi
+  fi
   if [ -z "$local_dir" ]; then
     # 在线下载的文件没有下载隔离标记，信任选项没有区别，只需确认一次。
     if [ -z "$trust" ] && [ "$confirmed" -eq 0 ]; then
@@ -350,6 +453,11 @@ main() {
     /usr/bin/xattr -dr com.apple.quarantine "$INSTALL_STAGE/KeepClam.app" || fail "无法移除该应用的下载隔离标记。" "Could not remove this app's quarantine attribute."
   fi
   require_stopped
+  if [ "$INSTALL_APP_RUNNING" -eq 1 ]; then
+    quit_running_app
+    require_stopped
+    [ "$INSTALL_APP_RUNNING" -eq 0 ] || fail "KeepClam 未能退出，请手动退出后重新安装。" "KeepClam did not quit; quit it manually and run the installer again."
+  fi
   require_safe_target
   publish_app || fail "替换应用失败。" "Could not replace the app."
   say "安装完成：KeepClam ${version}" "Installed KeepClam ${version}."

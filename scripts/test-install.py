@@ -81,13 +81,19 @@ class InstallerTests(unittest.TestCase):
     def assert_old_preserved(self):
         self.assertEqual((self.dest / "preserve-me.txt").read_text(), "previous installation")
 
-    def run_installer(self, extra=(), overrides="", local=True, trust=True, locale="en_US.UTF-8", env_extra=None):
-        # macOS 的沙箱可能禁止枚举系统进程；只在测试子进程中替换此检查。
+    def run_installer(self, extra=(), overrides="", local=True, trust=True, locale="en_US.UTF-8", env_extra=None,
+                      stub_stopped=True, app_dir=True):
+        # macOS 的沙箱可能禁止枚举系统进程，本机也可能正运行着真实的 KeepClam；测试子进程
+        # 从不枚举真实进程：要么整体跳过运行检查，要么只替换进程列表，检查逻辑本身照常执行。
         # 其余下载解析、解压、签名校验、隔离属性及文件替换均执行真实实现。
         # 同时让本机是否装有 Homebrew 版 KeepClam 不影响测试。
-        script = ('source "$1"; shift; require_stopped() { :; }; homebrew_cask_installed() { return 1; };\n'
+        stubs = ('require_stopped() { :; };' if stub_stopped
+                 else 'legacy_running() { return 1; }; keepclam_processes() { :; };')
+        script = ('source "$1"; shift; ' + stubs + ' homebrew_cask_installed() { return 1; };\n'
                   + overrides + '\nmain "$@"')
-        args = ["--app-dir", str(self.app_dir), "--no-open", "--language", "en"]
+        args = ["--no-open", "--language", "en"]
+        if app_dir:
+            args += ["--app-dir", str(self.app_dir)]
         if local:
             args += ["--local", str(self.local)]
         if trust:
@@ -237,6 +243,155 @@ require_stopped() {
         self.assert_failure(self.run_installer(overrides=overrides), "app is running")
         self.assert_old_preserved()
         self.assertEqual(list(self.app_dir.iterdir()), [self.dest])
+
+    @staticmethod
+    def process_list(*lines):
+        body = "".join(f"printf '%s\\n' '{line}'; " for line in lines)
+        return "keepclam_processes() { : ; " + body + "}"
+
+    def test_running_state_classification(self):
+        uid = os.getuid()
+        cases = {
+            "none": [],
+            "app": [f"101 {uid} /Applications/KeepClam.app/Contents/MacOS/KeepClam"],
+            "session": [f"101 {uid} /Applications/KeepClam.app/Contents/MacOS/KeepClam",
+                        f"102 {uid} /Applications/KeepClam.app/Contents/MacOS/KeepClam --guard 101 4"],
+            "other_user": [f"101 {uid + 1} /Applications/KeepClam.app/Contents/MacOS/KeepClam"],
+        }
+        for expected, lines in cases.items():
+            with self.subTest(expected=expected):
+                script = ('source "$1"; legacy_running() { return 1; }; '
+                          + self.process_list(*lines) + '; running_state')
+                result = self.run_script(script, "en_US.UTF-8")
+                self.assertEqual(result.stdout.strip(), expected, result.stderr)
+        result = self.run_script('source "$1"; legacy_running() { return 0; }; running_state', "en_US.UTF-8")
+        self.assertEqual(result.stdout.strip(), "legacy")
+
+    def test_session_blocks_installation(self):
+        self.old_app()
+        uid = os.getuid()
+        overrides = self.process_list(f"101 {uid} /x/KeepClam.app/Contents/MacOS/KeepClam",
+                                      f"102 {uid} /x/KeepClam.app/Contents/MacOS/KeepClam --guard 101 4")
+        self.assert_failure(self.run_installer(overrides=overrides, stub_stopped=False), "lid-closed session is running")
+        self.assert_old_preserved()
+
+    def test_other_users_app_blocks_installation(self):
+        self.old_app()
+        overrides = self.process_list(f"101 {os.getuid() + 1} /x/KeepClam.app/Contents/MacOS/KeepClam")
+        self.assert_failure(self.run_installer(overrides=overrides, stub_stopped=False), "Another user is running")
+        self.assert_old_preserved()
+
+    def test_legacy_app_blocks_installation(self):
+        self.old_app()
+        result = self.run_installer(overrides="legacy_running() { return 0; }", stub_stopped=False)
+        self.assert_failure(result, "legacy LidAwake")
+        self.assert_old_preserved()
+
+    def test_unknown_process_state_cancels_installation(self):
+        self.old_app()
+        result = self.run_installer(overrides="keepclam_processes() { return 1; }", stub_stopped=False)
+        self.assert_failure(result, "Could not check for running apps")
+        self.assert_old_preserved()
+
+    def spawn_fake_app(self):
+        # 用一个只会等待信号的小程序模拟正在运行的菜单栏应用（复制的系统程序换路径后会被系统
+        # 结束，所以现场编译）。经由 bash 后台启动，退出后由 launchd 回收，不会残留僵尸进程。
+        # 测试只会结束这个进程，从不碰本机真实的 KeepClam。
+        fake = self.root / "KeepClam"
+        source = self.root / "fake-app.c"
+        source.write_text("#include <unistd.h>\nint main(void) { for (;;) pause(); }\n")
+        command("/usr/bin/clang", "-o", str(fake), str(source))
+        pid = int(subprocess.run(["/bin/bash", "-c", f'"{fake}" >/dev/null 2>&1 & echo $!'],
+                                 capture_output=True, text=True, check=True).stdout)
+        self.addCleanup(lambda: subprocess.run(["/bin/kill", "-KILL", str(pid)], capture_output=True))
+        return pid
+
+    @staticmethod
+    def alive(pid):
+        return subprocess.run(["/bin/kill", "-0", str(pid)], capture_output=True).returncode == 0
+
+    def test_running_app_is_quit_before_replacement(self):
+        self.old_app()
+        pid = self.spawn_fake_app()
+        overrides = f'keepclam_processes() {{ /bin/ps -ww -o pid=,uid=,args= -p {pid} 2>/dev/null || true; }}'
+        result = self.run_installer(overrides=overrides, stub_stopped=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("it will be quit before installing", result.stdout)
+        self.assertIn("Quitting the running KeepClam", result.stdout)
+        self.assertFalse(self.alive(pid))
+        self.assertFalse((self.dest / "preserve-me.txt").exists())
+
+    def test_running_app_is_not_quit_when_installation_fails(self):
+        self.old_app()
+        pid = self.spawn_fake_app()
+        with self.archive.open("ab") as stream:
+            stream.write(b"corrupted download")
+        overrides = f'keepclam_processes() {{ /bin/ps -ww -o pid=,uid=,args= -p {pid} 2>/dev/null || true; }}'
+        self.assert_failure(self.run_installer(overrides=overrides, stub_stopped=False), "Checksum mismatch")
+        self.assertTrue(self.alive(pid))
+        self.assert_old_preserved()
+
+    def test_session_started_before_quit_blocks_replacement(self):
+        self.old_app()
+        uid = os.getuid()
+        # 进程列表在子 shell 中读取，用文件记录调用次数。
+        counter = self.root / "process-checks"
+        overrides = f'''keepclam_processes() {{
+  printf x >> "{counter}"
+  printf '%s\\n' "101 {uid} /x/KeepClam.app/Contents/MacOS/KeepClam"
+  if [ "$(/usr/bin/wc -c < "{counter}")" -gt 1 ]; then printf '%s\\n' "102 {uid} /x/KeepClam.app/Contents/MacOS/KeepClam --guard 101 4"; fi
+}}'''
+        self.assert_failure(self.run_installer(overrides=overrides, stub_stopped=False), "lid-closed session is running")
+        self.assert_old_preserved()
+
+    def app_dirs(self, system_writable=True):
+        system, personal = self.root / "System Applications", self.root / "Home Applications"
+        system.mkdir()
+        personal.mkdir()
+        if not system_writable:
+            system.chmod(0o555)
+            self.addCleanup(system.chmod, 0o755)
+        return system, personal, f"standard_app_dirs() {{ printf '%s\\n' '{system}' '{personal}'; }}"
+
+    def test_default_location_without_existing_install_is_system(self):
+        system, personal, overrides = self.app_dirs()
+        result = self.run_installer(overrides=overrides, app_dir=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((system / "KeepClam.app").is_dir())
+        self.assertFalse((personal / "KeepClam.app").exists())
+
+    def test_default_location_falls_back_to_personal_when_system_is_read_only(self):
+        system, personal, overrides = self.app_dirs(system_writable=False)
+        result = self.run_installer(overrides=overrides, app_dir=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((personal / "KeepClam.app").is_dir())
+
+    def test_update_keeps_existing_personal_location(self):
+        system, personal, overrides = self.app_dirs()
+        shutil.copytree(APP, personal / "KeepClam.app")
+        result = self.run_installer(overrides=overrides, app_dir=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((system / "KeepClam.app").exists())
+        values = plistlib.loads((personal / "KeepClam.app/Contents/Info.plist").read_bytes())
+        self.assertEqual(values["CFBundleShortVersionString"], VERSION)
+
+    def test_update_prefers_system_copy_and_warns_about_duplicate(self):
+        system, personal, overrides = self.app_dirs()
+        shutil.copytree(APP, system / "KeepClam.app")
+        shutil.copytree(APP, personal / "KeepClam.app")
+        (personal / "KeepClam.app/preserve-me.txt").write_text("personal copy")
+        result = self.run_installer(overrides=overrides, app_dir=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("another copy of KeepClam", result.stderr)
+        self.assertEqual((personal / "KeepClam.app/preserve-me.txt").read_text(), "personal copy")
+
+    def test_existing_read_only_system_install_is_not_duplicated(self):
+        system, personal, overrides = self.app_dirs()
+        shutil.copytree(APP, system / "KeepClam.app")
+        system.chmod(0o555)
+        self.addCleanup(system.chmod, 0o755)
+        self.assert_failure(self.run_installer(overrides=overrides, app_dir=False), "can't write there")
+        self.assertFalse((personal / "KeepClam.app").exists())
 
     def test_failed_replacement_restores_old_app(self):
         self.old_app()

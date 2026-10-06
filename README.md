@@ -77,9 +77,9 @@ curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/insta
 ```
 
 - Picks the newest release (including previews) and verifies the SHA-256 checksum, archive contents, app identity and code signature. If any check fails, the installed app is left untouched.
-- Shows the version, source and install location, then asks you to press Enter. Installs to `/Applications`, or `~/Applications` if that isn't writable.
+- Shows the version, source and install location, then asks you to press Enter. Installs to `/Applications`, or `~/Applications` if that isn't writable; an existing install is updated in place, so you never end up with two copies.
 - Apps installed this way carry no quarantine attribute, so macOS won't block the first launch.
-- To update: stop the session and quit the app from the menu, then run the same command.
+- To update, run the same command again. A running app is quit first and reopened afterwards; if a lid-closed session is active, the script stops and asks you to turn it off from the menu first.
 
 ### Option 2: Homebrew
 
@@ -102,7 +102,7 @@ curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/insta
 - `--language zh|en`: output language; follows your system by default.
 - All options: `bash install.sh --help`.
 
-The script stops and explains why if KeepClam is running or was installed with Homebrew.
+The script stops and explains why if a lid-closed session is active, the legacy LidAwake app is running, or KeepClam was installed with Homebrew.
 </details>
 
 <details>
