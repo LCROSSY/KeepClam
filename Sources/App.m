@@ -16,6 +16,10 @@
 #import <sys/wait.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import <libproc.h>
+#import <Security/Security.h>
+#import "Uninstall.m"
+// Exported by Security.framework; its SecTranslocate.h header is absent from the Command Line Tools SDK.
+extern Boolean SecTranslocateIsTranslocatedURL(CFURLRef path,bool *isTranslocated,CFErrorRef *error);
 
 static BOOL PrivateDirectory(NSString *path) {
     if(![NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:nil]) return NO;
@@ -59,8 +63,9 @@ static void Append(NSString *path,NSString *line) {
 
 // Runs a tool to completion and returns merged stdout/stderr. `limit` bounds a runaway
 // task with SIGKILL; outStatus receives its termination status (-1 when launch failed).
-static NSString *RunLimit(NSString *path,NSArray *args,NSTimeInterval limit,int *outStatus) {
+static NSString *RunLimitWithEnvironment(NSString *path,NSArray *args,NSTimeInterval limit,int *outStatus,NSDictionary *environment) {
     NSTask *task=[NSTask new]; task.launchPath=path; task.arguments=args;
+    if(environment) task.environment=environment;
     NSPipe *pipe=[NSPipe pipe]; task.standardOutput=pipe; task.standardError=pipe;
     @try { [task launch];
         dispatch_source_t timeout=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
@@ -71,6 +76,7 @@ static NSString *RunLimit(NSString *path,NSArray *args,NSTimeInterval limit,int 
         return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
     } @catch(NSException *e) { if(outStatus) *outStatus=-1; return @"unknown"; }
 }
+static NSString *RunLimit(NSString *path,NSArray *args,NSTimeInterval limit,int *outStatus) { return RunLimitWithEnvironment(path,args,limit,outStatus,nil); }
 static NSString *Run(NSString *path, NSArray *args) { return RunLimit(path,args,10,NULL); }
 typedef NS_ENUM(NSInteger, SleepState) { SleepUnknown=-1, SleepOff=0, SleepOn=1 };
 static SleepState DecodeSleepState(CFTypeRef value) {
@@ -101,14 +107,21 @@ static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
         t=@{
             @"menu.enable":@[@"开启合盖运行",@"Enable Lid-Closed Running"],
             @"menu.disable":@[@"关闭合盖运行",@"Disable Lid-Closed Running"],
-            @"menu.thermal":@[@"系统热状态：%@",@"Thermal state: %@"],
+            @"menu.thermal":@[@"热状态：%@",@"Thermal: %@"],
+            @"menu.thermal.protected":@[@"热状态：%@ · 每 5 秒检查",@"Thermal: %@ · 5 s checks"],
             @"menu.thermal.idle":@[@"采样已停止",@"Sampling stopped"],
-            @"menu.detail.idle":@[@"开启后每 5 秒检查过热，无运行时限",@"On enable: overheat checked every 5 s, no time limit"],
-            @"menu.detail.session.timed":@[@"保护会话中 · 剩余 %@ · 每 5 秒检查过热",@"Protected session · %@ left · overheat checked every 5 s"],
-            @"menu.detail.session.open":@[@"保护会话中 · 无时限 · 每 5 秒检查过热",@"Protected session · no time limit · overheat checked every 5 s"],
-            @"menu.detail.external":@[@"外部开启的状态；请关闭后重新开启以启用保护",@"Enabled externally; turn off and on again here to get protection"],
+            @"menu.detail.idle":@[@"开启后保护 · 无时限",@"On enable: protected · unlimited"],
+            @"menu.detail.idle.timed":@[@"开启后保护 · 限时 %@",@"On enable: protected · %@"],
+            @"menu.detail.session.timed":@[@"保护中 · 剩余 %@",@"Protected · %@ left"],
+            @"menu.detail.session.open":@[@"保护中 · 无时限",@"Protected · no time limit"],
+            @"menu.detail.external":@[@"外部开启 · 未受保护",@"Enabled externally · unprotected"],
+            @"menu.detail.external.recovery":@[@"关闭后重新开启以启用保护",@"Turn off, then on here for protection"],
+            @"menu.detail.guard.missing":@[@"保护已中断",@"Protection interrupted"],
+            @"menu.detail.guard.restoring":@[@"正在恢复睡眠…",@"Restoring sleep…"],
             @"menu.login":@[@"登录时启动",@"Launch at Login"],
             @"menu.login.approval":@[@"登录时启动：等待系统批准…",@"Launch at Login: Approval Required…"],
+            @"menu.detail.unknown":@[@"无法确认系统睡眠状态",@"Sleep state unavailable"],
+            @"menu.detail.unknown.recovery":@[@"请尝试恢复睡眠",@"Try restoring sleep"],
             @"state.unknown":@[@"无法确认系统睡眠状态，请尝试恢复睡眠",@"Sleep state unavailable; try restoring sleep"],
             @"menu.settings":@[@"设置",@"Settings"],
             @"menu.duration":@[@"自动结束",@"Auto-Stop"],
@@ -134,7 +147,25 @@ static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
             @"lang.zh":@[@"简体中文",@"简体中文"],
             @"lang.en":@[@"English",@"English"],
             @"menu.logs":@[@"查看运行日志",@"View Logs"],
-            @"auth.off":@[@"免密授权：未安装 — 点击安装",@"Passwordless sudo: not installed — click to install"],
+            @"menu.uninstall":@[@"卸载 KeepClam…",@"Uninstall KeepClam…"],
+            @"uninstall.title":@[@"卸载 KeepClam？",@"Uninstall KeepClam?"],
+            @"uninstall.body":@[@"将停止合盖运行并恢复允许睡眠，关闭登录时启动，移除免密授权，并永久删除当前应用、日志与设置。可能需要管理员密码。\n\n其他电源配置不会重置；系统管理的历史记录不在清理范围内。",@"This stops lid-closed running, restores normal sleep, disables launch at login, removes passwordless sudo, and permanently deletes this app, its logs and settings. An admin password may be required.\n\nOther power settings are preserved. System-managed history is outside the cleanup scope."],
+            @"uninstall.confirm":@[@"卸载",@"Uninstall"],
+            @"uninstall.progress":@[@"正在卸载…",@"Uninstalling…"],
+            @"uninstall.incomplete":@[@"清理尚未完成",@"Cleanup incomplete"],
+            @"uninstall.retry":@[@"请重试卸载或退出",@"Retry uninstall or quit"],
+            @"uninstall.remaining":@[@"应用已删除，但以下文件未能清理，请按路径手动处理：\n\n%@",@"The app was removed, but these files could not be cleaned up. Remove the listed paths manually:\n\n%@"],
+            @"uninstall.broken":@[@"应用已被部分或全部删除，以下清理未完成。请按所列路径处理残留，或重新安装后重试。KeepClam 将退出：\n\n%@",@"The app was partially or fully removed, but cleanup did not finish. Remove the listed remnants manually, or reinstall and retry. KeepClam will quit:\n\n%@"],
+            @"uninstall.signature.failed":@[@"无法确认当前运行代码的签名身份，已拒绝管理员删除。",@"The running code's signing identity could not be verified. Privileged deletion was refused."],
+            @"uninstall.failed.title":@[@"未能完成卸载",@"Uninstall Could Not Finish"],
+            @"uninstall.failed.body":@[@"合盖运行已停止。以下步骤未完成，应用将保留；已完成的清理不会撤销：\n\n%@",@"Lid-closed running has stopped. The following step did not finish; the app will be kept. Completed cleanup will not be undone:\n\n%@"],
+            @"uninstall.restore.failed":@[@"未能确认保护进程停止及睡眠恢复，已取消卸载，尚未删除文件。\n\n%@",@"The guard could not be confirmed stopped and normal sleep restored. Uninstall was cancelled; no files have been deleted.\n\n%@"],
+            @"uninstall.login.failed":@[@"无法关闭登录时启动：%@",@"Could not disable launch at login: %@"],
+            @"uninstall.sudoers.changed":@[@"免密授权文件的内容或类型已改变，已保留它。请检查 /etc/sudoers.d/keepclam 后重试。",@"The passwordless sudo file has changed or is not a regular file. It was preserved. Check /etc/sudoers.d/keepclam before retrying."],
+            @"uninstall.admin.failed":@[@"管理员授权被取消或未能完成：%@",@"Admin authorization was cancelled or failed: %@"],
+            @"uninstall.translocated":@[@"KeepClam 正在从系统的临时隔离位置运行，无法定位实际的应用文件，未做任何更改。请先在访达中把 KeepClam.app 移到「应用程序」文件夹，重新打开后再卸载。",@"KeepClam is running from a temporary translocated location, so the actual app file could not be located. Nothing was changed. Move KeepClam.app to the Applications folder in Finder, reopen it, then uninstall."],
+            @"uninstall.brew.failed":@[@"Homebrew 卸载未完成，请运行 brew uninstall --cask keepclam 重试：%@",@"Homebrew uninstall did not finish. Retry with brew uninstall --cask keepclam: %@"],
+            @"auth.off":@[@"安装免密授权…",@"Install Passwordless Sudo…"],
             @"auth.on":@[@"免密授权：已安装",@"Passwordless sudo: installed"],
             @"menu.help":@[@"使用说明",@"Help"],
             @"menu.quit":@[@"退出并恢复睡眠",@"Quit and Restore Sleep"],
@@ -153,7 +184,7 @@ static NSDictionary<NSString *,NSArray<NSString *> *> *StringsTable(void) {
             @"auth.installed.title":@[@"免密授权已安装",@"Passwordless Whitelist Installed"],
             @"auth.installed.view.body":@[@"白名单 %@ 仅授权以下两条命令免密执行：\n\n%@\n\n查看实际内容：sudo cat %@\n移除授权：运行 scripts/uninstall-sudoers.sh",@"The whitelist %@ authorizes exactly these two commands without a password:\n\n%@\n\nInspect it: sudo cat %@\nRemove it: run scripts/uninstall-sudoers.sh"],
             @"auth.installed.body":@[@"以后开关合盖运行不再需要输入管理员密码。可用 scripts/uninstall-sudoers.sh 移除。",@"Toggling no longer needs an admin password. Remove anytime with scripts/uninstall-sudoers.sh."],
-            @"toggle.fail.pmset.body":@[@"无法设置系统睡眠策略。可在菜单中选择「免密授权：未安装 — 点击安装」一次性授权，或重试输入管理员密码。",@"Could not set the system sleep policy. Install the passwordless whitelist from the menu, or retry with the admin password."],
+            @"toggle.fail.pmset.body":@[@"无法设置系统睡眠策略。可在菜单中选择「安装免密授权…」一次性授权，或重试输入管理员密码。",@"Could not set the system sleep policy. Install the passwordless whitelist from the menu, or retry with the admin password."],
             @"toggle.fail.guard.title":@[@"保护进程启动失败",@"Failed to Start the Guard"],
             @"toggle.fail.guard.body":@[@"已恢复系统睡眠设置，请重试。",@"Sleep settings were restored; please try again."],
             @"toggle.lowpower":@[@"当前处于低电量模式（电池供电），不适合开启合盖运行",@"Low Power Mode is on (on battery) — not a good time to start lid-closed running"],
@@ -325,6 +356,7 @@ static BOOL MigrateLegacyLogs(NSString *home) {
 // uninstall must all agree. Fixed literal with no shell metacharacters, so it can be
 // interpolated into the install command as-is.
 static NSString *SudoersPath(void){ return @"/etc/sudoers.d/keepclam"; }
+static const NSInteger UninstallAuthorizationChangedStatus=3; // privileged removal's "rule changed" exit
 static NSString *LockPath(void){ return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/KeepClam/guard.lock"]; }
 
 static void GuardLog(NSString *event) {
@@ -464,13 +496,14 @@ static int StopGuardWithPrompt(BOOL allowPrompt) {
 static int StopGuard(void) { return StopGuardWithPrompt(YES); }
 static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 
-@interface App : NSObject <NSApplicationDelegate, NSMenuDelegate>
+@interface App : NSObject <NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation>
 @property NSStatusItem *item;
 @property NSMenuItem *loginItem;
 
 @property NSMenuItem *toggleItem;
 @property NSMenuItem *thermalItem;
 @property NSMenuItem *detailItem;
+@property NSMenuItem *recoveryItem;
 @property NSMenuItem *authItem;
 @property NSTimer *timer;
 @property NSString *logPath;
@@ -479,6 +512,8 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 @property BOOL owned;
 @property BOOL active;
 @property BOOL sampling;
+@property BOOL uninstalling;
+@property BOOL uninstallRecoveryOnly;
 @property dispatch_queue_t worker;
 @property int logFD; // resident log fd, touched only on self.worker; -1 until opened
 @property NSString *sampleKey;
@@ -516,6 +551,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 // Log writes never run on the main thread: they are appended by self.worker so a busy
 // disk cannot stall the menu. Ordering is guaranteed by the queue, durability by fsync.
 - (void)log:(NSString *)event {
+    if(self.uninstalling || self.uninstallRecoveryOnly) return;
     NSString *line=[NSString stringWithFormat:@"%@ | %@\n",[NSDate date],event];
     dispatch_async(self.worker,^{ [self writeLine:line]; });
 }
@@ -523,7 +559,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 // rotation — ours (size over 1 MB) or the guard's (detected by the inode mismatch).
 // Cross-process mutual exclusion stays with the flock; the mode stays 0600.
 - (void)writeLine:(NSString *)line {
-    if(!self.logPath) return;
+    if(self.uninstalling || self.uninstallRecoveryOnly || !self.logPath) return;
     NSString *path=self.logPath;
     int lock=open([[path stringByAppendingString:@".lock"] fileSystemRepresentation],O_CREAT|O_RDWR|O_NOFOLLOW|O_CLOEXEC,0600);
     if(lock<0) return;
@@ -583,6 +619,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     } @catch(NSException *e) {}
 }
 - (void)notify:(NSString *)body {
+    if(self.uninstalling) return;
     @try {
         if(!NSClassFromString(@"UNUserNotificationCenter")) return;
         UNUserNotificationCenter *center=UNUserNotificationCenter.currentNotificationCenter;
@@ -596,13 +633,20 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 - (NSMenuItem *)add:(NSString *)title action:(SEL)action menu:(NSMenu *)menu {
     NSMenuItem *i=[[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:@""]; i.target=self; [menu addItem:i]; return i;
 }
+- (NSString *)idleDetail {
+    NSInteger duration=self.sessionDuration;
+    return duration>0?[NSString stringWithFormat:L(@"menu.detail.idle.timed"),FormatInterval(duration,LangIndex())]:L(@"menu.detail.idle");
+}
 // Builds the whole menu; called again on language switch so titles take effect immediately.
 - (void)buildMenu {
     NSMenu *menu=[NSMenu new]; menu.delegate=self;
     [self add:@"KeepClam" action:nil menu:menu];
     self.toggleItem=[self add:L(@"menu.enable") action:@selector(toggle:) menu:menu];
     self.thermalItem=[self add:L(@"menu.thermal.idle") action:nil menu:menu];
-    self.detailItem=[self add:L(@"menu.detail.idle") action:nil menu:menu];
+    self.detailItem=[self add:[self idleDetail] action:nil menu:menu];
+    // Keep recovery instructions on their own row so warnings do not widen every item.
+    self.recoveryItem=[self add:@"" action:nil menu:menu];
+    self.recoveryItem.hidden=YES;
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *settings=[self add:L(@"menu.settings") action:nil menu:menu]; NSMenu *sm=[NSMenu new];
     self.loginItem=[self add:L(@"menu.login") action:@selector(loginChanged:) menu:sm];
@@ -645,6 +689,8 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     language.submenu=lang;
     [sm addItem:NSMenuItem.separatorItem];
     [self add:L(@"menu.logs") action:@selector(logs:) menu:sm];
+    [sm addItem:NSMenuItem.separatorItem];
+    [self add:L(@"menu.uninstall") action:@selector(uninstall:) menu:sm];
     settings.submenu=sm;
     self.authItem=[self add:L(@"auth.off") action:@selector(authAction:) menu:menu];
     [menu addItem:NSMenuItem.separatorItem];
@@ -788,6 +834,11 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 // and self-heal — this app holds the same whitelist, so it restores sleep itself.
 - (void)handleGuardMissing {
     self.owned=NO; self.sessionDeadline=nil;
+    self.thermalItem.hidden=NO;
+    self.thermalItem.title=[NSString stringWithFormat:L(@"menu.thermal"),Thermal()];
+    self.detailItem.title=L(@"menu.detail.guard.missing");
+    self.recoveryItem.title=L(@"menu.detail.guard.restoring");
+    self.recoveryItem.hidden=NO;
     [self log:@"guard_missing: protection unavailable"];
     [self notify:L(@"notify.guard_missing")];
     if(self.busy) return;
@@ -801,6 +852,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
                 [self log:@"guard_missing_restore_failed: sudo -n pmset could not restore sleep"];
                 [self notify:L(@"notify.guard_missing_fail")];
             }
+            [self tick:nil];
         });
     });
 }
@@ -833,7 +885,7 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     self.guardProcSource=source;
 }
 - (void)tick:(id)sender {
-    if(self.busy || self.sampling) return;
+    if(self.uninstallRecoveryOnly || self.uninstalling || self.busy || self.sampling) return;
     self.sampling=YES;
     NSUInteger generation=self.generation;
     dispatch_async(self.worker, ^{
@@ -845,7 +897,10 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     if(state==SleepUnknown) {
         self.item.button.title=@"? KeepClam";
         self.toggleItem.title=L(@"menu.disable");
-        self.detailItem.title=L(@"state.unknown");
+        self.thermalItem.hidden=YES;
+        self.detailItem.title=L(@"menu.detail.unknown");
+        self.recoveryItem.title=L(@"menu.detail.unknown.recovery");
+        self.recoveryItem.hidden=NO;
         if(self.owned) [self performAutoStop:@"state_unknown"];
         return;
     }
@@ -853,7 +908,6 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     self.authItem.title=authInstalled?L(@"auth.on"):L(@"auth.off");
     self.toggleItem.title=enabled?L(@"menu.disable"):L(@"menu.enable");
     self.item.button.title=enabled?@"● KeepClam":@"○ KeepClam";
-    self.thermalItem.title=enabled?[NSString stringWithFormat:L(@"menu.thermal"),Thermal()]:L(@"menu.thermal.idle");
     if(self.active && !enabled) [self endSessionWithReason:@"session_ended"];
     if(!self.active && enabled) [self log:@"session_observed_enabled"];
     self.active=enabled;
@@ -861,10 +915,14 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
         [self handleGuardMissing];
         return;
     }
-    if(!enabled) self.detailItem.title=L(@"menu.detail.idle");
+    self.thermalItem.hidden=NO;
+    self.thermalItem.title=enabled?[NSString stringWithFormat:L(self.owned?@"menu.thermal.protected":@"menu.thermal"),Thermal()]:L(@"menu.thermal.idle");
+    if(!enabled) self.detailItem.title=[self idleDetail];
     else if(self.owned && self.sessionDeadline) self.detailItem.title=[NSString stringWithFormat:L(@"menu.detail.session.timed"),FormatInterval([self.sessionDeadline timeIntervalSinceNow],LangIndex())];
     else if(self.owned) self.detailItem.title=L(@"menu.detail.session.open");
     else self.detailItem.title=L(@"menu.detail.external");
+    self.recoveryItem.title=L(@"menu.detail.external.recovery");
+    self.recoveryItem.hidden=!(enabled && !self.owned);
     if(enabled && (!self.lastLog || -self.lastLog.timeIntervalSinceNow>=[NSUserDefaults.standardUserDefaults integerForKey:@"interval"])) {
         self.sampling=YES;
         BOOL probe=!self.networkTime || -self.networkTime.timeIntervalSinceNow>=60;
@@ -1002,6 +1060,269 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
     if([a runModal]==NSAlertSecondButtonReturn)
         [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/LCROSSY/KeepClam"]];
 }
+// Narrow operations keep the destructive flow testable with temporary bundles.
+- (NSString *)uninstallAppPath { return NSBundle.mainBundle.bundlePath; }
+- (NSString *)uninstallBundleID { return NSBundle.mainBundle.bundleIdentifier; }
+- (NSString *)uninstallHome {
+    char resolved[PATH_MAX];
+    return realpath(NSHomeDirectory().fileSystemRepresentation,resolved)?[NSString stringWithUTF8String:resolved]:NSHomeDirectory();
+}
+- (int)uninstallRestoreSleep { return StopGuard(); }
+- (BOOL)uninstallUnregisterLogin:(NSError **)error {
+    SMAppService *service=SMAppService.mainAppService;
+    if(service.status==SMAppServiceStatusNotRegistered || service.status==SMAppServiceStatusNotFound) return YES;
+    return [service unregisterAndReturnError:error];
+}
+- (BOOL)uninstallAdminCommand:(NSString *)command error:(NSError **)error {
+    __block BOOL ok=NO;
+    __block NSError *failure=nil;
+    void (^authorize)(void)=^{
+        NSString *escaped=[[command stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"] stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+        NSAppleScript *script=[[NSAppleScript alloc] initWithSource:[NSString stringWithFormat:@"do shell script \"%@\" with administrator privileges",escaped]];
+        NSDictionary *details=nil;
+        ok=[script executeAndReturnError:&details]!=nil;
+        if(!ok) failure=[self uninstallAdminError:details];
+    };
+    if(NSThread.isMainThread) authorize(); else dispatch_sync(dispatch_get_main_queue(),authorize);
+    if(error) *error=failure;
+    return ok;
+}
+// The code keeps the AppleScript error number: -128 is a cancelled prompt, and a
+// positive number is the shell command's exit status.
+- (NSError *)uninstallAdminError:(NSDictionary *)details {
+    NSString *reason=details[NSAppleScriptErrorMessage] ?: @"Authorization failed";
+    return [NSError errorWithDomain:UninstallErrorDomain code:[details[NSAppleScriptErrorNumber] integerValue]
+        userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:L(@"uninstall.admin.failed"),reason]}];
+}
+- (NSString *)uninstallAuthorizationPath { return SudoersPath(); }
+// Runs as root. Exits 3 when the rule is no longer exactly ours or not a regular
+// file; a rule that disappeared before the prompt finished counts as removed.
+- (NSString *)uninstallAuthorizationCommand:(NSString *)path {
+    NSString *file=Quote(path);
+    return [NSString stringWithFormat:@"if [ ! -e %@ ] && [ ! -L %@ ]; then exit 0; fi; [ ! -L %@ ] && [ -f %@ ] || exit %ld; /usr/bin/printf '%%s\\n' %@ | /usr/bin/cmp -s - %@ || exit %ld; /bin/rm -f %@",
+        file,file,file,file,(long)UninstallAuthorizationChangedStatus,Quote([self ruleText]),file,(long)UninstallAuthorizationChangedStatus,file];
+}
+- (BOOL)uninstallRemoveAuthorization:(NSError **)error {
+    NSString *path=[self uninstallAuthorizationPath];
+    struct stat st;
+    if(lstat(path.fileSystemRepresentation,&st)!=0) {
+        if(errno==ENOENT) return YES;
+        return UninstallFailure(error,path,@"Cannot inspect passwordless authorization",errno);
+    }
+    NSString *expected=[[self ruleText] stringByAppendingString:@"\n"];
+    if(!S_ISREG(st.st_mode))
+        return UninstallFailure(error,path,L(@"uninstall.sudoers.changed"),EINVAL);
+    // Installed rules are root:wheel 0440, so ordinary users may not read them.
+    NSError *readError=nil;
+    NSString *actual=[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
+    if(actual && ![actual isEqualToString:expected])
+        return UninstallFailure(error,path,L(@"uninstall.sudoers.changed"),EINVAL);
+    // Recheck content in the privileged operation; do not run user-writable code as root.
+    NSError *adminError=nil;
+    if(![self uninstallAdminCommand:[self uninstallAuthorizationCommand:path] error:&adminError]) {
+        if(adminError.code==UninstallAuthorizationChangedStatus)
+            return UninstallFailure(error,path,L(@"uninstall.sudoers.changed"),EINVAL);
+        if(error) *error=adminError;
+        return NO;
+    }
+    if(lstat(path.fileSystemRepresentation,&st)!=0 && errno==ENOENT) return YES;
+    return UninstallFailure(error,path,@"Authorization file could not be removed",EACCES);
+}
+- (NSString *)uninstallBrewForApp:(NSString *)appPath { return UninstallHomebrewForApp(appPath,@[@"/opt/homebrew",@"/usr/local"]); }
+- (NSString *)uninstallTrustedRequirement:(NSError **)error {
+    SecCodeRef running=NULL; CFDictionaryRef info=NULL; SecRequirementRef requirement=NULL;
+    OSStatus status=SecCodeCopySelf(kSecCSDefaultFlags,&running);
+    if(status==errSecSuccess) status=SecCodeCopySigningInformation((SecStaticCodeRef)running,kSecCSDefaultFlags,&info);
+    NSData *cdhash=info?((__bridge NSDictionary *)info)[(__bridge NSString *)kSecCodeInfoUnique]:nil;
+    NSMutableString *hex=[NSMutableString string];
+    if([cdhash isKindOfClass:NSData.class] && cdhash.length==20) {
+        const unsigned char *bytes=cdhash.bytes; for(NSUInteger i=0;i<cdhash.length;i++) [hex appendFormat:@"%02x",bytes[i]];
+    } else status=errSecCSUnsigned;
+    NSString *text=[NSString stringWithFormat:@"cdhash H\"%@\"",hex];
+    if(status==errSecSuccess) status=SecRequirementCreateWithString((__bridge CFStringRef)text,kSecCSDefaultFlags,&requirement);
+    // Dynamic validity compares the kernel's running CDHash to this exact disk
+    // identity. A replaced executable cannot become its own trust anchor.
+    if(status==errSecSuccess) status=SecCodeCheckValidity(running,kSecCSStrictValidate,requirement);
+    if(requirement) CFRelease(requirement); if(info) CFRelease(info); if(running) CFRelease(running);
+    if(status!=errSecSuccess) { UninstallFailure(error,[self uninstallAppPath],L(@"uninstall.signature.failed"),(int)status); return nil; }
+    return text;
+}
+- (BOOL)uninstallDeleteApp:(NSString *)appPath bundleID:(NSString *)bundleID brew:(NSString *)brew error:(NSError **)error {
+    if(brew) {
+        int status=-1;
+        NSMutableDictionary *environment=[NSProcessInfo.processInfo.environment mutableCopy];
+        environment[@"HOMEBREW_NO_AUTOREMOVE"]=@"1";
+        environment[@"HOMEBREW_NO_AUTO_UPDATE"]=@"1";
+        NSString *output=RunLimitWithEnvironment(brew,@[@"uninstall",@"--cask",@"keepclam"],120,&status,environment);
+        if(status!=0 || [NSFileManager.defaultManager fileExistsAtPath:appPath])
+            return UninstallFailure(error,appPath,[NSString stringWithFormat:L(@"uninstall.brew.failed"),output],EIO);
+        return YES;
+    }
+    if(!UninstallValidateApp(appPath,bundleID,error)) return NO;
+    NSFileManager *fm=NSFileManager.defaultManager;
+    BOOL needsAdmin=![fm isDeletableFileAtPath:appPath];
+    for(NSString *relative in [fm enumeratorAtPath:appPath]) {
+        if(![fm isDeletableFileAtPath:[appPath stringByAppendingPathComponent:relative]]) { needsAdmin=YES; break; }
+    }
+    if(!needsAdmin) return UninstallRemoveApp(appPath,bundleID,error);
+    // Only a copy matching the current process's kernel-checked code identity may
+    // run as root. Force this architecture so Rosetta cannot select another slice.
+    struct stat identity;
+    if(lstat(appPath.fileSystemRepresentation,&identity)!=0) return UninstallFailure(error,appPath,@"Cannot inspect application identity",errno);
+    NSString *requirement=[self uninstallTrustedRequirement:error];
+    if(!requirement) return NO;
+#if defined(__arm64__)
+    NSString *architecture=@"arm64";
+#else
+    NSString *architecture=@"x86_64";
+#endif
+    NSString *command=[NSString stringWithFormat:@"stage=$(/usr/bin/mktemp -d /private/tmp/keepclam-uninstall.XXXXXX) || exit 1; trap '/bin/rm -rf \"$stage\"' EXIT; /usr/bin/ditto %@ \"$stage/KeepClam.app\" && /usr/bin/codesign --verify --strict --architecture %@ -R %@ \"$stage/KeepClam.app\" && /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/arch -%@ \"$stage/KeepClam.app/Contents/MacOS/KeepClam\" --uninstall-remove-app %@ %@ %llu %llu",Quote(appPath),architecture,Quote([@"=" stringByAppendingString:requirement]),architecture,Quote(appPath),Quote(bundleID),(unsigned long long)identity.st_dev,(unsigned long long)identity.st_ino];
+    if(![self uninstallAdminCommand:command error:error]) return NO;
+    if(![fm fileExistsAtPath:appPath]) return YES;
+    return UninstallFailure(error,appPath,@"Application could not be removed",EACCES);
+}
+- (void)uninstallClearPreferences:(NSString *)bundleID {
+    [NSUserDefaults.standardUserDefaults removePersistentDomainForName:bundleID];
+    CFStringRef appID=(__bridge CFStringRef)bundleID;
+    CFArrayRef keys=CFPreferencesCopyKeyList(appID,kCFPreferencesCurrentUser,kCFPreferencesCurrentHost);
+    if(keys) { CFPreferencesSetMultiple(NULL,keys,appID,kCFPreferencesCurrentUser,kCFPreferencesCurrentHost); CFRelease(keys); }
+    CFPreferencesSynchronize(appID,kCFPreferencesCurrentUser,kCFPreferencesCurrentHost);
+    CFPreferencesAppSynchronize(appID);
+}
+- (NSArray<NSError *> *)uninstallRemoveData:(NSString *)home bundleID:(NSString *)bundleID {
+    return UninstallRemoveUserDataPreservingRuntime(home,bundleID);
+}
+- (void)uninstallClearNotifications {
+    @try {
+        UNUserNotificationCenter *center=UNUserNotificationCenter.currentNotificationCenter;
+        [center removeAllPendingNotificationRequests]; [center removeAllDeliveredNotifications];
+    } @catch(NSException *exception) {}
+}
+- (BOOL)uninstallRestoreRuntime:(NSError **)error { return UninstallPrepareRuntimeDirectories([self uninstallHome],error); }
+- (void)uninstallInitializeDefaults {
+    if(![NSUserDefaults.standardUserDefaults integerForKey:@"interval"]) [NSUserDefaults.standardUserDefaults setInteger:5 forKey:@"interval"];
+    if(![NSUserDefaults.standardUserDefaults integerForKey:@"battery_floor"]) [NSUserDefaults.standardUserDefaults setInteger:20 forKey:@"battery_floor"];
+}
+- (void)uninstallResumeAfterFailure {
+    NSError *error=nil;
+    self.uninstallRecoveryOnly=![self uninstallRestoreRuntime:&error];
+    self.uninstalling=NO; self.busy=NO;
+    if(!self.uninstallRecoveryOnly) {
+        [self uninstallInitializeDefaults];
+        [self buildMenu];
+        self.timer=[NSTimer scheduledTimerWithTimeInterval:5 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+        [self tick:nil];
+    } else {
+        self.thermalItem.hidden=YES;
+        self.detailItem.title=L(@"uninstall.incomplete");
+        self.recoveryItem.title=L(@"uninstall.retry"); self.recoveryItem.hidden=NO;
+    }
+}
+- (void)uninstallFailed:(NSString *)message sleepRestored:(BOOL)restored {
+    [self uninstallResumeAfterFailure];
+    NSAlert *alert=[NSAlert new]; alert.messageText=L(@"uninstall.failed.title");
+    alert.informativeText=[NSString stringWithFormat:L(restored?@"uninstall.failed.body":@"uninstall.restore.failed"),message];
+    [alert runModal];
+}
+- (BOOL)uninstallRemoveRuntime:(NSString *)home error:(NSError **)error { return UninstallRemoveRuntimeData(home,error); }
+- (void)uninstallRemaining:(NSString *)message {
+    NSAlert *alert=[NSAlert new]; alert.messageText=L(@"uninstall.failed.title");
+    alert.informativeText=[NSString stringWithFormat:L(@"uninstall.remaining"),message]; [alert runModal];
+}
+- (BOOL)uninstallAppStillUsable:(NSString *)path bundleID:(NSString *)bundleID {
+    if(!UninstallValidateApp(path,bundleID,NULL)) return NO;
+    int status=-1;
+    RunLimit(@"/usr/bin/codesign",@[@"--verify",@"--strict",path],10,&status);
+    return status==0;
+}
+- (void)uninstallBrokenApplication:(NSString *)message {
+    self.uninstallRecoveryOnly=YES;
+    NSAlert *alert=[NSAlert new]; alert.messageText=L(@"uninstall.failed.title");
+    alert.informativeText=[NSString stringWithFormat:L(@"uninstall.broken"),message]; [alert runModal];
+    [self uninstallClearNotifications]; [self uninstallFinished];
+}
+- (void)uninstallFinished { _exit(0); } // Normal quit would recreate logs/preferences.
+// A quarantined app opened in place runs from a read-only translocated copy; its
+// bundle path is not the file the user installed and cannot be deleted.
+- (BOOL)uninstallAppIsTranslocated:(NSString *)appPath {
+    bool translocated=false;
+    NSURL *url=[NSURL fileURLWithPath:appPath];
+    if(SecTranslocateIsTranslocatedURL((__bridge CFURLRef)url,&translocated,NULL) && translocated) return YES;
+    return [appPath.pathComponents containsObject:@"AppTranslocation"];
+}
+- (void)uninstallRefused:(NSString *)message {
+    NSAlert *alert=[NSAlert new]; alert.messageText=L(@"uninstall.failed.title"); alert.informativeText=message; [alert runModal];
+}
+- (void)startUninstall {
+    if(self.busy || self.uninstalling) return;
+    NSString *appPath=[self uninstallAppPath],*bundleID=[self uninstallBundleID],*home=[self uninstallHome];
+    if([self uninstallAppIsTranslocated:appPath]) { [self uninstallRefused:L(@"uninstall.translocated")]; return; }
+    NSError *error=nil;
+    if(!UninstallValidateApp(appPath,bundleID,&error) || !UninstallUserCleanupPaths(home,bundleID,&error)) {
+        [self uninstallRefused:error.localizedDescription]; return;
+    }
+    NSString *brew=[self uninstallBrewForApp:appPath];
+    [self flush];
+    self.uninstalling=YES; self.busy=YES; self.generation++;
+    [self.timer invalidate]; self.timer=nil;
+    self.detailItem.title=L(@"uninstall.progress"); self.thermalItem.hidden=YES; self.recoveryItem.hidden=YES;
+    dispatch_async(self.worker,^{
+        int stopped=[self uninstallRestoreSleep];
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(stopped!=0) { [self uninstallFailed:L(stopped==2?@"toggle.guardstuck.body":@"toggle.restorefail.body") sleepRestored:NO]; return; }
+            [self endSessionWithReason:nil]; self.active=NO;
+            NSError *failure=nil;
+            if(![self uninstallUnregisterLogin:&failure]) {
+                [self uninstallFailed:[NSString stringWithFormat:L(@"uninstall.login.failed"),failure.localizedDescription ?: @""] sleepRestored:YES]; return;
+            }
+            if(![self uninstallRemoveAuthorization:&failure]) {
+                [self uninstallFailed:failure.localizedDescription ?: L(@"uninstall.sudoers.changed") sleepRestored:YES]; return;
+            }
+            dispatch_async(self.worker,^{
+                // The queue is drained; close the resident fd before removing its directory.
+                if(self.logFD>=0) { close(self.logFD); self.logFD=-1; }
+                [self uninstallClearPreferences:bundleID];
+                NSArray<NSError *> *failures=[self uninstallRemoveData:home bundleID:bundleID];
+                NSError *removeError=nil;
+                BOOL removed=failures.count==0 && [self uninstallDeleteApp:appPath bundleID:bundleID brew:brew error:&removeError];
+                BOOL broken=removeError && ![self uninstallAppStillUsable:appPath bundleID:bundleID];
+                NSError *runtimeError=nil;
+                if(removed) [self uninstallRemoveRuntime:home error:&runtimeError];
+                dispatch_async(dispatch_get_main_queue(),^{
+                    if(!removed) {
+                        NSMutableArray *messages=[NSMutableArray array];
+                        for(NSError *e in failures) [messages addObject:e.localizedDescription];
+                        if(removeError) [messages addObject:removeError.localizedDescription];
+                        if(broken) {
+                            [messages addObject:appPath];
+                            // Keep the instance lock until exit; explicitly report
+                            // its directory because a damaged app cannot retry.
+                            [messages addObject:[home stringByAppendingPathComponent:@"Library/Application Support/KeepClam"]];
+                            [self uninstallBrokenApplication:[messages componentsJoinedByString:@"\n\n"]]; return;
+                        }
+                        [self uninstallFailed:[messages componentsJoinedByString:@"\n\n"] sleepRestored:YES]; return;
+                    }
+                    if(runtimeError) [self uninstallRemaining:runtimeError.localizedDescription];
+                    [self uninstallClearNotifications];
+                    [self uninstallFinished];
+                });
+            });
+        });
+    });
+}
+- (void)uninstall:(id)sender {
+    if(self.busy || self.uninstalling) return;
+    NSAlert *alert=[NSAlert new]; alert.alertStyle=NSAlertStyleWarning;
+    alert.messageText=L(@"uninstall.title"); alert.informativeText=L(@"uninstall.body");
+    [alert addButtonWithTitle:L(@"custom.cancel")];
+    NSButton *button=[alert addButtonWithTitle:L(@"uninstall.confirm")]; button.hasDestructiveAction=YES;
+    [NSApp activateIgnoringOtherApps:YES];
+    if([alert runModal]==NSAlertSecondButtonReturn) [self startUninstall];
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if(self.busy || self.uninstalling) return NO;
+    return !self.uninstallRecoveryOnly || item.action==@selector(uninstall:) || item.action==@selector(quit:) || item.action==@selector(help:);
+}
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
     if(self.busy) return NSTerminateCancel;
     self.busy=YES; self.generation++;
@@ -1025,6 +1346,18 @@ static int StopGuardNoPrompt(void) { return StopGuardWithPrompt(NO); }
 @end
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
+        // Internal, staged root helper: never initialize defaults, logs or NSApplication.
+        if(argc==6 && strcmp(argv[1],"--uninstall-remove-app")==0) {
+            if(geteuid()!=0) return 1;
+            char *deviceEnd=NULL,*inodeEnd=NULL;
+            errno=0;
+            unsigned long long device=strtoull(argv[4],&deviceEnd,10),inode=strtoull(argv[5],&inodeEnd,10);
+            if(errno || !device || !inode || !deviceEnd || *deviceEnd || !inodeEnd || *inodeEnd || argv[4][0]=='-' || argv[5][0]=='-') return 1;
+            NSError *error=nil;
+            BOOL ok=UninstallRemoveAppExpected([NSString stringWithUTF8String:argv[2]],[NSString stringWithUTF8String:argv[3]],device,inode,&error);
+            if(!ok) fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);
+            return ok?0:1;
+        }
         if(argc==4 && strcmp(argv[1],"--guard")==0) return Guard(atoi(argv[2]),atoi(argv[3]));
         if(argc==2 && strcmp(argv[1],"--stop")==0) return StopGuard();
         NSString *support=[LockPath() stringByDeletingLastPathComponent];

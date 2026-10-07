@@ -32,7 +32,7 @@ The menu-bar title shows the current state: `○ KeepClam` when off, `● KeepCl
    curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash
    ```
 
-2. **Install passwordless sudo** (one time): choose **Passwordless sudo: not installed — click to install** in the menu and enter your admin password once. Unattended auto-stops and overheat protection rely on it; see [Passwordless sudo](#passwordless-sudo).
+2. **Install passwordless sudo** (one time): choose **Install Passwordless Sudo…** in the menu and enter your admin password once. Unattended auto-stops and overheat protection rely on it; see [Passwordless sudo](#passwordless-sudo).
 3. **Turn it on**: choose **Enable Lid-Closed Running**. Once the menu bar shows `● KeepClam`, close the lid and your work keeps running.
 
 ## Why KeepClam?
@@ -144,7 +144,7 @@ Toggling `SleepDisabled` needs admin rights. KeepClam offers a one-time sudoers 
 <your-username> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1
 ```
 
-- **Install**: choose **Passwordless sudo: not installed — click to install** in the menu, or run `zsh scripts/install-sudoers.sh` in the repository.
+- **Install**: choose **Install Passwordless Sudo…** in the menu, or run `zsh scripts/install-sudoers.sh` in the repository.
 - **Inspect**: `sudo cat /etc/sudoers.d/keepclam`
 - **Remove**: `sudo rm -f /etc/sudoers.d/keepclam` (or `zsh scripts/uninstall-sudoers.sh` in the repository).
 
@@ -205,24 +205,29 @@ Logs are in `~/Library/Logs/KeepClam/`; open them from **Settings → View Logs*
 
 ## Uninstall
 
-1. Choose **Disable Lid-Closed Running** in the menu and turn off **Settings → Launch at Login**.
-2. Remove passwordless sudo: `sudo rm -f /etc/sudoers.d/keepclam`.
-3. Choose **Quit and Restore Sleep**.
-4. Delete the app: `brew uninstall --cask keepclam` for Homebrew installs; otherwise move **KeepClam.app** to the Trash.
-5. (Optional) Delete logs in `~/Library/Logs/KeepClam/` and settings with `defaults delete io.github.LCROSSY.keepclam`.
+Choose **Settings → Uninstall KeepClam…** in the menu bar, read the confirmation, and click **Uninstall**. The app will:
 
-Finally, run `pmset -g | grep SleepDisabled` and make sure `SleepDisabled 1` is not shown.
+1. Stop the guard and confirm normal sleep is restored. If this fails, uninstall stops before deleting files.
+2. Disable launch at login and remove this app's passwordless sudo rule. An admin password may be required.
+3. Permanently delete the current user's app logs, settings, caches and runtime files.
+4. Delete this **KeepClam.app** and exit. Homebrew installations are uninstalled through Homebrew, with automatic removal of unrelated dependencies disabled.
+
+Cancelling the confirmation changes no settings or files. If KeepClam was opened directly from Downloads and macOS is running it from a translocated copy, uninstall is refused without changes; move the app to Applications and reopen it first. Later failures identify unfinished cleanup; completed cleanup is not undone. When the app is kept, necessary runtime directories are restored. If they cannot be restored, only retrying uninstall or quitting is available.
+
+Cleanup covers this app and the current user's app data, excluding other copies, other users' data and system-managed history. Restoring sleep disables the app's `SleepDisabled` switch without resetting other power settings.
+
+For older versions without the menu entry: disable lid-closed running and launch at login, then choose **Quit and Restore Sleep**. Remove authorization with `zsh scripts/uninstall-sudoers.sh`; run `brew uninstall --cask keepclam` for Homebrew installs or delete the app otherwise. Logs and runtime files are in `~/Library/Logs/KeepClam/` and `~/Library/Application Support/KeepClam/`; remove preferences with `defaults delete io.github.LCROSSY.keepclam`.
 
 ## Development
 
 ```sh
 zsh scripts/build-native.command        # build the app
-clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement \
+clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement -framework Security \
       Sources/LogTests.m -o build/LogTests && ./build/LogTests   # run tests
 python3 scripts/test-install.py          # check installation and updates in temporary directories
 ```
 
-Single-file Objective-C/AppKit, no Xcode project, no dependencies. See [Architecture](docs/architecture.md) for how the guard and brake path work.
+Objective-C/AppKit, with scoped uninstall cleanup in `Sources/Uninstall.m`, no Xcode project and no dependencies. See [Architecture](docs/architecture.md) for how the guard and brake path work.
 
 ## License
 

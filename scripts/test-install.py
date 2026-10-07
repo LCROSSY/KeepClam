@@ -310,10 +310,17 @@ require_stopped() {
     def alive(pid):
         return subprocess.run(["/bin/kill", "-0", str(pid)], capture_output=True).returncode == 0
 
+    @staticmethod
+    def fake_app_processes(pid):
+        # 只探测本测试创建的 PID。沙箱可能连针对单个 PID 的 ps 都禁止，
+        # 不能把 ps 的权限错误吞成「没有应用运行」，否则退出流程根本没有被验证。
+        return (f'keepclam_processes() {{ if /bin/kill -0 {pid} 2>/dev/null; then '
+                f"printf '%s\\n' '{pid} {os.getuid()} /fixture/KeepClam'; fi; }}")
+
     def test_running_app_is_quit_before_replacement(self):
         self.old_app()
         pid = self.spawn_fake_app()
-        overrides = f'keepclam_processes() {{ /bin/ps -ww -o pid=,uid=,args= -p {pid} 2>/dev/null || true; }}'
+        overrides = self.fake_app_processes(pid)
         result = self.run_installer(overrides=overrides, stub_stopped=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("it will be quit before installing", result.stdout)
@@ -326,7 +333,7 @@ require_stopped() {
         pid = self.spawn_fake_app()
         with self.archive.open("ab") as stream:
             stream.write(b"corrupted download")
-        overrides = f'keepclam_processes() {{ /bin/ps -ww -o pid=,uid=,args= -p {pid} 2>/dev/null || true; }}'
+        overrides = self.fake_app_processes(pid)
         self.assert_failure(self.run_installer(overrides=overrides, stub_stopped=False), "Checksum mismatch")
         self.assertTrue(self.alive(pid))
         self.assert_old_preserved()
