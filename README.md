@@ -87,7 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/insta
 brew install --cask LCROSSY/tap/keepclam
 ```
 
-To update: `brew update && brew upgrade --cask keepclam`. macOS may block the first launch of a Homebrew install; see the [FAQ](#faq).
+To update: `brew update && brew upgrade --cask keepclam`. Like the one-line installer, the cask removes only KeepClam's quarantine attribute, so there's no Privacy & Security step.
 
 <details>
 <summary><b>Installer options</b></summary>
@@ -170,7 +170,7 @@ pmset -g | grep SleepDisabled    # verify: "SleepDisabled 1" should be gone
 <details>
 <summary><b>macOS blocks the first launch. What should I do?</b></summary>
 
-Installs from the one-line command aren't affected. Homebrew and manual installs carry a quarantine attribute, and KeepClam isn't notarized, so macOS may block it. If you trust the source, try opening it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. See [Apple's instructions](https://support.apple.com/en-us/102445).
+Installs from the one-line command or Homebrew aren't affected. Manual installs carry a quarantine attribute, and KeepClam isn't notarized, so macOS may block it. If you trust the source, try opening it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. See [Apple's instructions](https://support.apple.com/en-us/102445).
 
 Or remove only KeepClam's quarantine attribute in Terminal (use `"$HOME/Applications/KeepClam.app"` for a personal install):
 

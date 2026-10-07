@@ -87,7 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/insta
 brew install --cask LCROSSY/tap/keepclam
 ```
 
-更新：`brew update && brew upgrade --cask keepclam`。Homebrew 安装的应用首次打开可能被 macOS 拦截，处理方法见[常见问题](#常见问题)。
+更新：`brew update && brew upgrade --cask keepclam`。与一行命令安装相同，cask 安装时只移除 KeepClam 的下载隔离标记，打开时不需要到「隐私与安全性」放行。
 
 <details>
 <summary><b>安装脚本的选项</b></summary>
@@ -170,7 +170,7 @@ pmset -g | grep SleepDisabled    # 确认：不应再出现 "SleepDisabled 1"
 <details>
 <summary><b>首次打开被 macOS 拦截怎么办？</b></summary>
 
-用一行命令安装的不会遇到这个问题。通过 Homebrew 或手动安装时，应用带有下载隔离标记，而 KeepClam 未经 Apple 公证，所以可能被拦截。确认来源可信后，先尝试打开一次，再到「系统设置 → 隐私与安全性」点击「仍要打开」，参见 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。
+用一行命令或 Homebrew 安装的不会遇到这个问题。手动安装时，应用带有下载隔离标记，而 KeepClam 未经 Apple 公证，所以可能被拦截。确认来源可信后，先尝试打开一次，再到「系统设置 → 隐私与安全性」点击「仍要打开」，参见 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。
 
 也可以在终端只移除 KeepClam 的隔离标记（装在个人应用目录时，把路径换成 `"$HOME/Applications/KeepClam.app"`）：
 
