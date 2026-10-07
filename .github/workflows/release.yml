@@ -12,6 +12,8 @@ permissions:
 jobs:
   release:
     runs-on: macos-14
+    outputs:
+      zip-sha256: ${{ steps.package.outputs.zip-sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -20,12 +22,14 @@ jobs:
           KEEPCLAM_VERSION: ${{ github.ref_name }}
 
       - name: Package
+        id: package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           /usr/bin/ditto -c -k --norsrc --noextattr --keepParent build/KeepClam.app "KeepClam-${VERSION}.zip"
           cp scripts/install.sh install.sh
           shasum -a 256 "KeepClam-${VERSION}.zip" install.sh > SHA256SUMS
           cat SHA256SUMS
+          echo "zip-sha256=$(shasum -a 256 "KeepClam-${VERSION}.zip" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -44,3 +48,44 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
+
+  # 发布后同步 Homebrew tap 的版本与校验值。需要仓库密钥 HOMEBREW_TAP_TOKEN：
+  # 仅对 LCROSSY/homebrew-tap 有 Contents 读写权限的 fine-grained token。
+  # 带 “-” 的预览标签（如 v0.3.0-beta.1）不更新 tap。
+  homebrew-tap:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+    steps:
+      - name: Check token
+        if: env.HAS_TAP_TOKEN != 'true'
+        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set; update LCROSSY/homebrew-tap manually."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.HAS_TAP_TOKEN == 'true'
+        with:
+          repository: LCROSSY/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Bump cask
+        if: env.HAS_TAP_TOKEN == 'true'
+        env:
+          SHA256: ${{ needs.release.outputs.zip-sha256 }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Missing ZIP checksum."; exit 1; }
+          sed -i -E "s/^  version \".*\"$/  version \"${VERSION}\"/; s/^  sha256 \".*\"$/  sha256 \"${SHA256}\"/" Casks/keepclam.rb
+          sed -i -E "s/当前提供 v[0-9][0-9A-Za-z.+]* /当前提供 v${VERSION} /" README.md
+          grep -qx "  version \"${VERSION}\"" Casks/keepclam.rb
+          grep -qx "  sha256 \"${SHA256}\"" Casks/keepclam.rb
+          if git diff --quiet; then
+            echo "Tap already at ${VERSION}."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "release: KeepClam v${VERSION}"
+          git push
