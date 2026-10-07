@@ -8,7 +8,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp ../Sources/Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Universal binary held to the macOS 13 floor promised in the README.
 clang -fobjc-arc -arch arm64 -arch x86_64 -mmacosx-version-min=13.0 \
-  -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement \
+  -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement -framework Security \
   ../Sources/App.m -o "$APP/Contents/MacOS/KeepClam"
 cp ../Sources/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP/Contents/Info.plist"

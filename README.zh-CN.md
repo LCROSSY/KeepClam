@@ -32,7 +32,7 @@
    curl -fsSL https://raw.githubusercontent.com/LCROSSY/KeepClam/main/scripts/install.sh | bash
    ```
 
-2. **安装免密授权**（一次性）：在菜单中点击「免密授权：未安装 — 点击安装」，输入一次管理员密码。合盖后无人值守时，自动结束和过热保护都靠它完成，详见[免密授权](#免密授权)。
+2. **安装免密授权**（一次性）：在菜单中点击「安装免密授权…」，输入一次管理员密码。合盖后无人值守时，自动结束和过热保护都靠它完成，详见[免密授权](#免密授权)。
 3. **开启**：点击「开启合盖运行」，菜单栏变成 `● KeepClam` 后合上盖子，任务继续跑。
 
 ## 为什么需要它
@@ -144,7 +144,7 @@ open build/KeepClam.app
 <你的用户名> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1
 ```
 
-- **安装**：在菜单中点击「免密授权：未安装 — 点击安装」，或在仓库目录运行 `zsh scripts/install-sudoers.sh`。
+- **安装**：在菜单中点击「安装免密授权…」，或在仓库目录运行 `zsh scripts/install-sudoers.sh`。
 - **查看**：`sudo cat /etc/sudoers.d/keepclam`
 - **移除**：`sudo rm -f /etc/sudoers.d/keepclam`（或在仓库目录运行 `zsh scripts/uninstall-sudoers.sh`）。
 
@@ -205,24 +205,29 @@ Apple Silicon 没有向普通权限的程序提供稳定统一的 CPU 温度接�
 
 ## 卸载
 
-1. 在菜单中点击「关闭合盖运行」，并关闭「设置 → 登录时启动」。
-2. 移除免密授权：`sudo rm -f /etc/sudoers.d/keepclam`。
-3. 点击「退出并恢复睡眠」。
-4. 删除应用：Homebrew 安装的运行 `brew uninstall --cask keepclam`，其他方式安装的把 **KeepClam.app** 移到废纸篓。
-5. （可选）删除日志 `~/Library/Logs/KeepClam/` 和设置 `defaults delete io.github.LCROSSY.keepclam`。
+在菜单栏选择 **设置 → 卸载 KeepClam…**，阅读确认说明后点击「卸载」。应用会依次：
 
-最后运行 `pmset -g | grep SleepDisabled` 确认没有输出 `SleepDisabled 1`。
+1. 停止保护进程并确认恢复允许睡眠；失败则取消卸载，尚不删除文件。
+2. 关闭登录时启动，移除本应用的免密授权（可能需要管理员密码）。
+3. 永久删除当前用户的应用日志、设置、缓存及运行文件。
+4. 删除当前 **KeepClam.app** 并退出；Homebrew 安装会通过 Homebrew 卸载，不自动移除其他软件的依赖。
+
+取消确认弹窗不会更改设置或删除文件。如果直接在「下载」中打开、macOS 正从临时隔离位置运行 KeepClam，卸载会被拒绝且不做任何更改；请先把应用移到「应用程序」并重新打开。后续步骤失败时会说明哪些内容未清理；已完成的清理不会撤销。应用保留时会恢复必要的运行目录，无法恢复则只允许重试卸载或退出。
+
+清理范围限于当前应用和当前用户的应用数据，不包含其他副本、其他用户的数据或系统维护的历史记录。恢复睡眠只关闭本应用使用的 `SleepDisabled`，不重置其他电源配置。
+
+旧版本没有菜单卸载入口时：先关闭合盖运行和登录时启动，选择「退出并恢复睡眠」，再运行 `zsh scripts/uninstall-sudoers.sh` 移除授权；Homebrew 安装运行 `brew uninstall --cask keepclam`，其他安装删除应用。日志与运行文件分别在 `~/Library/Logs/KeepClam/` 和 `~/Library/Application Support/KeepClam/`，偏好设置可用 `defaults delete io.github.LCROSSY.keepclam` 清除。
 
 ## 开发
 
 ```sh
 zsh scripts/build-native.command        # 构建应用
-clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement \
+clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement -framework Security \
       Sources/LogTests.m -o build/LogTests && ./build/LogTests   # 运行测试
 python3 scripts/test-install.py          # 在临时目录中验证安装与更新
 ```
 
-整个应用就一个 Objective-C/AppKit 源文件，没有 Xcode 工程，零依赖。守护进程、刹车路径等设计见 [架构说明](docs/architecture.zh-CN.md)。
+应用使用 Objective-C/AppKit，卸载安全清理单独放在 `Sources/Uninstall.m`，没有 Xcode 工程，零依赖。守护进程、刹车路径等设计见 [架构说明](docs/architecture.zh-CN.md)。
 
 ## 许可
 

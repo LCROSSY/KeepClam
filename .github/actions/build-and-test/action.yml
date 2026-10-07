@@ -10,9 +10,17 @@ runs:
     - name: Run unit tests
       shell: bash
       run: |
-        clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement \
+        clang -fobjc-arc -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement -framework Security \
           Sources/LogTests.m -o build/LogTests
         ./build/LogTests
+
+    - name: Test scoped uninstall and failure handling
+      shell: bash
+      run: |
+        clang -fobjc-arc -mmacosx-version-min=13.0 -framework Foundation Sources/UninstallTests.m -o build/UninstallTests
+        ./build/UninstallTests
+        clang -fobjc-arc -mmacosx-version-min=13.0 -framework Cocoa -framework IOKit -framework UserNotifications -framework ServiceManagement -framework Security Sources/UninstallFlowTests.m -o build/UninstallFlowTests
+        ./build/UninstallFlowTests
 
     - name: Test installer
       shell: bash
